@@ -1,0 +1,23 @@
+/* The canvas fills whatever box its parent gives it. */
+.reddot {
+  display: block;
+  width: 100%;
+  height: 100%;
+  touch-action: none; /* on touch screens: holding the dot must not scroll or zoom */
+
+  /* Holding the dot is a long press. Switch off what phones do with long presses and taps: */
+  -webkit-tap-highlight-color: transparent; /* Android/iOS: no coloured flash over the whole canvas on touch */
+  -webkit-user-select: none;                /* no text/element selection (Safari still needs the prefix) */
+  user-select: none;
+  -webkit-touch-callout: none;              /* iOS: no "Save image" menu on long press */
+}
+
+/* RedDotPage: the page fills exactly the visible screen, and the canvas inside fills the page.
+   position: fixed + inset: 0 rather than height: 100vh, because on phones 100vh is the height
+   with the address bar hidden, so the bottom of the page would end up under the bar. */
+.reddot-page {
+  position: fixed;
+  inset: 0;              /* top, right, bottom, left: 0 */
+  overflow: hidden;
+  background: #09090b;   /* the canvas background, also while the page loads */
+}
