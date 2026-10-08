@@ -103,3 +103,27 @@
 .reddot-settings .hint { color: #71717a; font-size: 12px; }
 .reddot-settings .note { margin: 0; color: #a1a1aa; font-size: 12px; }
 .reddot-settings .error { margin: 8px 0 0; color: #f87171; font-size: 12px; overflow-wrap: anywhere; }
+
+/* ---- the bin at the bottom: drop a line on it to remove it (RedDot.tsx) ---- */
+.reddot-bin {
+  position: absolute;
+  left: 50%;
+  bottom: 16px;
+  transform: translateX(-50%);
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  border: 1px solid #3f3f46;
+  border-radius: 50%;
+  background: #18181bcc;
+  color: #71717a;
+  pointer-events: none;  /* only a drop target: taps and drags go to the canvas below */
+  transition: transform 0.15s, color 0.15s, border-color 0.15s, background 0.15s;
+}
+.reddot-bin.target {     /* a line is held over it: letting go removes it */
+  transform: translateX(-50%) scale(1.25);
+  color: #fafafa;
+  border-color: #ef4444;
+  background: #7f1d1dcc;
+}

@@ -4,6 +4,7 @@
 //   addLine(lines, createLine(key, recording, placeNewLine(lines, dotCenter, dotRadius, size)))
 //   const line = lineAt(lines, x, y, size)    // what's under the pointer (topmost first)
 //   playLine(line)                            // play its audio; line.playing is true meanwhile
+//   removeLine(lines, line)                   // gone (dropped on the bin); stops its audio
 //   advanceLines(lines, dt)                   // every frame: move the waves
 
 import { LINE } from './looks.ts'
@@ -82,6 +83,18 @@ export function lineAt(lines: UtteranceLine[], x: number, y: number, size: Size)
     if (Math.abs(x - cx * size.width) <= hx + pad && Math.abs(y - cy * size.height) <= hy + pad) return lines[i]
   }
   return null
+}
+
+/** Take a line away for good (it was dropped on the bin). Its text label goes with it: lineLabels.ts
+ *  only shows labels of lines in the list. */
+export function removeLine(lines: UtteranceLine[], line: UtteranceLine): void {
+  const i = lines.indexOf(line)
+  if (i >= 0) lines.splice(i, 1)
+  if (current?.line === line) {
+    current.source.onended = null
+    current.source.stop()
+    current = null
+  }
 }
 
 /** Move a line to the end of the list, so it's drawn (and hit-tested) on top. */

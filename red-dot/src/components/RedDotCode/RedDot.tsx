@@ -10,7 +10,7 @@ import type { Choice } from './settings.ts'
 import { createOrbRenderer as createSdfRenderer } from './renderer.ts'
 import { createOrbRenderer as createMeshRenderer } from './rendererMesh.ts'
 import { useVoiceLink } from './useVoiceLink.ts'
-import { addLine, advanceLines, bringToFront, clampLine, createLine, lineAt, placeNewLine, playLine } from './utteranceLines.ts'
+import { addLine, advanceLines, bringToFront, clampLine, createLine, lineAt, placeNewLine, playLine, removeLine } from './utteranceLines.ts'
 import type { LineText, Size, UtteranceLine } from './utteranceLines.ts'
 import './RedDot.css'
 
@@ -110,6 +110,7 @@ export default function RedDot({ onStatusChange }: RedDotProps) {
 
   	const canvasRef = useRef<HTMLCanvasElement>(null)
   	const labelsRef = useRef<HTMLDivElement>(null)   // the text under the lines, over the canvas
+  	const binRef = useRef<HTMLDivElement>(null)      // the bin at the bottom: a line dropped on it is removed
   	const orb = useRef<OrbState>(createOrbState())
   	// The utterance lines, oldest first (the last one is drawn on top).
   	const lines = useRef<UtteranceLine[]>([])
@@ -260,6 +261,14 @@ export default function RedDot({ onStatusChange }: RedDotProps) {
   	const TAP_MS = 400       // pressed for less than this...
   	const TAP_MOVE_PX = 8    // ...and moved less than this: a tap
 
+  	// Is the pointer over the bin? (a little generous, like the lines: easier to hit with a finger)
+  	const overBin = (e: PointerEvent<HTMLCanvasElement>): boolean => {
+    		const r = binRef.current?.getBoundingClientRect()
+    		const pad = 12
+    		return !!r && e.clientX >= r.left - pad && e.clientX <= r.right + pad && e.clientY >= r.top - pad && e.clientY <= r.bottom + pad
+  	}
+  	const showBinTarget = (on: boolean) => binRef.current?.classList.toggle('target', on)
+
   	const moveLine = (e: PointerEvent<HTMLCanvasElement>) => {
     		const d = drag.current
     		if (d?.kind !== 'line' || d.pointerId !== e.pointerId) return
@@ -268,6 +277,7 @@ export default function RedDot({ onStatusChange }: RedDotProps) {
     		if (!d.moved) return             // don't shift it by a pixel or two during a tap
     		const [cx, cy] = clampLine(x - d.grabX, y - d.grabY, size)
     		d.line.center = [cx / size.width, cy / size.height]
+    		showBinTarget(overBin(e))        // the bin lights up: letting go here removes the line
   	}
 
   	const isOnSomething = (e: PointerEvent<HTMLCanvasElement>): boolean => {
@@ -279,8 +289,10 @@ export default function RedDot({ onStatusChange }: RedDotProps) {
     		const d = drag.current
     		if (d?.kind === 'line') {
       			drag.current = null
+      			showBinTarget(false)
       			const tap = !d.moved && performance.now() - d.downAt < TAP_MS
       			if (tap && e.type === 'pointerup') playLine(d.line)  // a tap: play its utterance
+      			else if (d.moved && e.type === 'pointerup' && overBin(e)) removeLine(lines.current, d.line)  // dropped on the bin
     		} else if (d?.kind === 'dot' && handsFreeRef.current) {
       			drag.current = null
       			const tap = !d.moved && performance.now() - d.downAt < TAP_MS
@@ -333,6 +345,13 @@ export default function RedDot({ onStatusChange }: RedDotProps) {
       			}}
     		/>
     		<div ref={labelsRef} className="reddot-labels" aria-live="polite" />
+    		<div ref={binRef} className="reddot-bin" aria-hidden="true">
+      			<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+        				{/* a bin: lid with handle, and the can with three ribs */}
+        				<path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13M10 11v6M14 11v6" fill="none" stroke="currentColor"
+              				strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+      			</svg>
+    		</div>
     		<SettingsPanel choice={choice} onChange={changeChoice} available={available} error={available === false ? null : textError} />
     		</div>
   	)
