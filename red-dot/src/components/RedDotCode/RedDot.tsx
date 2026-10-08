@@ -3,11 +3,18 @@ import type { PointerEvent } from 'react'
 import { LOOKS, advance, createOrbState } from './looks.ts'
 import type { Look, LookName, OrbState } from './looks.ts'
 import type { LinkStatus } from './link.ts'
-import { createOrbRenderer } from './renderer.ts'
+import { createOrbRenderer as createSdfRenderer } from './renderer.ts'
+import { createOrbRenderer as createMeshRenderer } from './rendererMesh.ts'
 import { useVoiceLink } from './useVoiceLink.ts'
 import { addLine, advanceLines, bringToFront, clampLine, createLine, lineAt, placeNewLine, playLine } from './utteranceLines.ts'
 import type { Size, UtteranceLine } from './utteranceLines.ts'
 import './RedDot.css'
+
+// Two renderers draw the same picture: renderer.ts (one shader computes every pixel, the
+// default) and rendererMesh.ts (triangles + matrices, the classic way). Compare them with
+// ?renderer=mesh in the address bar.
+const createOrbRenderer =
+  new URLSearchParams(location.search).get('renderer') === 'mesh' ? createMeshRenderer : createSdfRenderer
 
 // The console hook (window.orb) is not part of the browser's own types: declare it.
 declare global {
