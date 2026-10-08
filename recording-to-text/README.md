@@ -50,6 +50,12 @@ transcript = await transcribe(read_wav("hello.wav"), "whisper", Params(language=
 | `GET /services` | | the services and what each can do |
 | `GET /health` | | `{"ok": true}` |
 
+At startup, the server warms up every service before it answers: it logs in and opens the
+connections with a free request (Google: each region; Whisper: the model list, which also checks
+the key). That takes about 5 s, and then the first real request is as fast as the others; without
+it, the first one took up to 7 s. The log says `warm-up: google ready`, or why a service isn't
+usable (e.g. a rejected key); the server starts either way.
+
 The protocol is described in full at the top of `recording_to_text/server.py`. One WebSocket can
 carry any number of streams, one after another. There's no access check yet: localhost only until
 it's deployed (step 7).

@@ -23,6 +23,11 @@ Streaming differs a lot between models (measured 2026-10-08, a 5 s German senten
 
 Models live in different regions; MODEL_LOCATIONS picks the endpoint per model.
 
+Warm-up: the first request of a fresh process took 2-7 s (loading the login ~0.9 s, then an access
+token and the connection to the region ~1 s, more when Google is slow). warm_up() does both for
+every region with a free request (listing the project's recognizers), so the first real request is
+as fast as the others.
+
 Settings (environment): GOOGLE_PROJECT (required); GOOGLE_LOCATION overrides MODEL_LOCATIONS for
 every model.
 
@@ -36,6 +41,7 @@ extras (mode 1):
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import AsyncIterator
 
@@ -81,6 +87,22 @@ class GoogleSpeech(Service):
         # "_" is the default recognizer: all settings go with each request instead of being
         # stored in a named recognizer resource.
         return self._clients[location], f"projects/{self._project}/locations/{location}/recognizers/_"
+
+    async def warm_up(self) -> None:
+        # One model per region is enough: the clients are per region.
+        if self._location:
+            models = [self.default_model]
+        else:
+            models = list({location: model for model, location in MODEL_LOCATIONS.items()}.values())
+
+        async def touch(model: str) -> None:
+            client, recognizer = self._endpoint(model)
+            await client.list_recognizers(request={"parent": recognizer.rsplit("/recognizers/", 1)[0], "page_size": 1})
+
+        try:
+            await asyncio.gather(*(touch(m) for m in models))
+        except GoogleAPICallError as e:
+            raise ServiceError(f"Google Speech-to-Text: {e.message or e}") from e
 
     def _config(self, params: Params, sample_rate: int, model: str) -> st.RecognitionConfig:
         return st.RecognitionConfig(

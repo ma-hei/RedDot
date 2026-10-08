@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 
@@ -46,8 +47,27 @@ MAX_STREAM_SECONDS = 290    # Google ends a stream after 5 minutes; end ours a l
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # mode 2: about 5 minutes of 16 kHz audio
 
 
+WARM_UP_SECONDS = 20  # don't hold up startup longer than this if a service is slow
+
+
+async def warm_up() -> None:
+    """Gets every service ready before the first request (see Service.warm_up). Failures are only
+    logged: the server starts anyway, and a request to that service then says what's wrong."""
+    async def one(name: str) -> None:
+        start = time.monotonic()
+        try:
+            await asyncio.wait_for(get_service(name).warm_up(), WARM_UP_SECONDS)
+            log.info("warm-up: %s ready (%.1f s)", name, time.monotonic() - start)
+        except ServiceError as e:
+            log.warning("warm-up: %s not usable: %s", name, e)
+        except asyncio.TimeoutError:
+            log.warning("warm-up: %s didn't answer within %d s", name, WARM_UP_SECONDS)
+    await asyncio.gather(*(one(name) for name in FACTORIES))
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    await warm_up()
     yield
     await close_all()
 

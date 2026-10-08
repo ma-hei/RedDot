@@ -104,5 +104,10 @@ class Service(ABC):
         except ValueError as e:  # e.g. a sample rate the voice detector can't handle
             raise ServiceError(str(e)) from e
 
+    async def warm_up(self) -> None:
+        """Get ready for the first request: log in, open connections. Called once at server
+        startup, so the first real request isn't slowed down by it. Must not cost anything.
+        Raises ServiceError if the service can't be used (e.g. a key is rejected)."""
+
     async def close(self) -> None:
         """Release connections. Called once when RecordingToText shuts down."""

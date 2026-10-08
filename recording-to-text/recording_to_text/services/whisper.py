@@ -103,6 +103,16 @@ class Whisper(Service):
             extras=extras,
         )
 
+    async def warm_up(self) -> None:
+        """Opens the connection and checks the key, with the free model list (GET /models; self-hosted
+        Whisper servers offer it too)."""
+        try:
+            response = await self._client.get("/models")
+        except httpx.HTTPError as e:
+            raise ServiceError(f"Whisper: can't reach {self._client.base_url} ({type(e).__name__})") from e
+        if response.status_code in (401, 403):
+            raise ServiceError(f"Whisper: the key was rejected: {_error_message(response)}")
+
     async def close(self) -> None:
         await self._client.aclose()
 
