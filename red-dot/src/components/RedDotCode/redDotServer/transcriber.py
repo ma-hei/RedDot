@@ -4,8 +4,11 @@ Optional: only active when RECORDING_TO_TEXT_URL is set, e.g. ws://localhost:809
 the dot (or R) is held, every 100 ms chunk also goes to RecordingToText; letting go ends the
 stream. One press is one stream. What comes back is only logged, in this terminal:
 
-    >>> google/long    partial          Hallo wie
-    >>> google/long    FINAL 0.98 de-DE Hallo, wie geht es dir?
+    >>> google/long        partial          Hallo wie
+    >>> google/long        FINAL 0.98 de-DE Hallo, wie geht es dir?
+    >>> whisper/whisper-1  FINAL 0.53 de    Ja, also ich wollte nur mal sagen...
+
+Services that can't stream (whisper) give one FINAL line per utterance, after each pause.
 
 If RecordingToText can't be reached or fails, the dot keeps working; the log says why.
 
@@ -102,11 +105,11 @@ class Transcriber:
                     label = f"{msg['service']}/{msg['model']}"
                     if msg["final"]:
                         conf = f"{msg['confidence']:.2f}" if msg.get("confidence") is not None else "  – "
-                        log.info(">>> %-14s FINAL %s %-5s %s", label, conf, msg.get("language") or "?", msg["text"])
+                        log.info(">>> %-18s FINAL %s %-5s %s", label, conf, msg.get("language") or "?", msg["text"])
                         self._last_partial = ""
                     elif msg["text"] != self._last_partial:
                         self._last_partial = msg["text"]
-                        log.info(">>> %-14s partial          %s", label, msg["text"])
+                        log.info(">>> %-18s partial          %s", label, msg["text"])
                 elif msg["type"] == "error":
                     log.warning(">>> RecordingToText: %s", msg["message"])
         except WebSocketException as e:

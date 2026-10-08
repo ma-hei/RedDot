@@ -152,7 +152,7 @@ There are no automated tests yet. `npm run build` type-checks the frontend (`tsc
 | `VAD_MIN_RMS` | `200` | how loud a chunk must be to count as speech (16-bit scale; speech is typically 1000–5000) |
 | `VAD_MODE` | `3` | WebRTC VAD strictness, 0 (lenient) to 3 (strictest) |
 | `RECORDING_TO_TEXT_URL` | – (off) | RecordingToText's `/stream` WebSocket, e.g. `ws://localhost:8092/stream`; each press is streamed there and the text is logged |
-| `RTT_SERVICE` | `google` | which RecordingToText service transcribes |
+| `RTT_SERVICE` | `google` | which RecordingToText service transcribes: `google` (live) or `whisper` (one result per utterance) |
 | `RTT_LANGUAGE` | `de-DE` | the spoken language; `none`: the service detects it |
 | `RTT_MODEL` | – (the service's default) | e.g. `long` for Google's live partial results; `chirp_2` (default) only answers at the end |
 

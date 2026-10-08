@@ -5,9 +5,13 @@ parameters (language, model, options), and returns a `Transcript`: the text, a c
 service has one), the language, word times, and service-specific `extras`.
 
 - **Mode 2** (a recording in, one result out): Google and Whisper.
-- **Mode 1** (a stream of audio in, a stream of results out): Google. Results are partial
-  (`final: false`, may still change) while the audio comes in, and settled (`final: true`) once
-  the service is sure. Whisper follows in step 5.
+- **Mode 1** (a stream of audio in, a stream of results out): Google and Whisper.
+  - **Google streams natively.** Results are partial (`final: false`, may still change) while
+    the audio comes in, and settled (`final: true`) once Google is sure.
+  - **Whisper can't stream.** RecordingToText cuts the stream into utterances at pauses, with the
+    same rules as the red dot, and sends each one whole. There's one final result per utterance,
+    about 0.7 s (the pause) plus the service's 1–2 s after it ends. Every service that can't
+    stream gets this automatically, including your own Whisper server later.
 
 ## Use it
 
@@ -59,7 +63,7 @@ README).
 | Name | What | Confidence | Word times | No language (detection) | Streaming |
 |---|---|---|---|---|---|
 | `google` | Google Cloud Speech-to-Text v2, `chirp_2` by default; also `long`, `short`, `chirp_3` | yes | yes | yes (`auto`), not with `long` | yes |
-| `whisper` | Whisper through the OpenAI transcription API, `whisper-1` | derived from token probabilities | yes | yes | no: per utterance (step 5) |
+| `whisper` | Whisper through the OpenAI transcription API, `whisper-1` | derived from token probabilities | yes | yes | per utterance, cut at pauses |
 
 **Google's models stream very differently** (a 5 s German sentence, sent in real time):
 
@@ -77,6 +81,13 @@ top of each file in `recording_to_text/services/`.
 **Your own Whisper server instead of OpenAI:** self-hosted Whisper servers (e.g. Speaches /
 faster-whisper, vLLM) offer the same transcription API. Set `WHISPER_BASE_URL` and `WHISPER_MODEL`
 in `settings.env` and the server's key as `WHISPER_API_KEY` in `.env`; the code stays the same.
+
+**Per utterance, in detail** (`services/per_utterance.py`, `utterances.py`): an utterance starts
+after 200 ms of speech (plus 300 ms from before, so the first syllable isn't cut) and ends after
+700 ms of quiet, after 15 s, or when the stream ends. Less than 300 ms of speech is dropped (a
+click, a cough). Word times count from the start of the stream; `extras.utterance` says where the
+utterance is (`start`, `end` in seconds). `options: {"pause_ms": 400}` in the start message
+changes the pause.
 
 **Adding a service:** a class implementing `Service` (`services/base.py`), registered in
 `FACTORIES` (`services/__init__.py`).
@@ -104,7 +115,9 @@ recording_to_text/
   services/base.py      the contract every service fulfils (mode 2 and mode 1)
   services/google.py    Google chirp_2
   services/whisper.py   Whisper (OpenAI API or your own server)
+  services/per_utterance.py  mode 1 for services that can't stream: one result per utterance
   services/__init__.py  the services by name
+  utterances.py         cuts a stream of audio into utterances at pauses
   __main__.py           the command line (mode 2)
   server.py             HTTP (mode 2) and WebSocket (mode 1)
 docs/setup.md           Google Cloud project and OpenAI key
