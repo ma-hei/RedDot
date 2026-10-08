@@ -23,7 +23,7 @@ def _setting(name: str, default: str | None = None) -> str:
 def _google() -> Service:
     from .google import GoogleSpeech
 
-    return GoogleSpeech(project=_setting("GOOGLE_PROJECT"), location=_setting("GOOGLE_LOCATION", "us-central1"))
+    return GoogleSpeech(project=_setting("GOOGLE_PROJECT"), location=os.getenv("GOOGLE_LOCATION") or None)
 
 
 def _whisper() -> Service:

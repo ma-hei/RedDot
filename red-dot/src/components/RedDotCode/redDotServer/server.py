@@ -2,10 +2,13 @@
 
 The browser streams the microphone while the dot (or R) is held; for every 100 ms chunk
 the server answers whether it is speech. For debugging, it also cuts the stream into
-utterances (utterances.py) and saves each as a WAV file in DEBUG_AUDIO_DIR. Everything
-runs locally: no speech-to-text, no Google Cloud.
+utterances (utterances.py) and saves each as a WAV file in DEBUG_AUDIO_DIR.
+
+Speech-to-text is optional and separate: with RECORDING_TO_TEXT_URL set, the audio of each press
+is also streamed to RecordingToText and the text it sends back is logged (transcriber.py).
 
 Run:   .venv/bin/uvicorn server:app --port 8090
+       RECORDING_TO_TEXT_URL=ws://localhost:8092/stream .venv/bin/uvicorn server:app --port 8090
        (the port the React dev server forwards to: see ../orb-react/vite.config.ts)
 
 HTTP:
@@ -34,6 +37,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 from speech_check import MIN_RMS, SAMPLE_RATE, ChunkCheck, SpeechCheck
+from transcriber import Transcriber
 from utterances import UtteranceEvent, UtteranceRecorder
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s.%(msecs)03d  %(message)s", datefmt="%H:%M:%S")
@@ -93,6 +97,7 @@ async def ws_endpoint(websocket: WebSocket) -> None:
 
     await websocket.accept()
     log.info("page connected")
+    transcriber = Transcriber()
     speech_check = SpeechCheck()
     recorder = UtteranceRecorder()
     talking = False  # the dot (or R) is held
@@ -118,8 +123,10 @@ async def ws_endpoint(websocket: WebSocket) -> None:
                     if not talking and (ev := recorder.finish()):
                         await utterance_done(ev, " because the dot/R was released")
                     log.info("=== %s ===", "talking" if talking else "not talking")
+                    await (transcriber.start() if talking else transcriber.stop())
             elif msg.get("bytes") and talking:
                 chunks += 1
+                await transcriber.chunk(msg["bytes"])
                 c = speech_check.check(msg["bytes"])
                 ev = recorder.feed(msg["bytes"], c.is_speech)
                 log.info(describe(chunks, c, recorder))
@@ -131,4 +138,5 @@ async def ws_endpoint(websocket: WebSocket) -> None:
     finally:
         if ev := recorder.finish():  # the page went away mid-sentence: keep what was said
             report(ev, " because the page disconnected")
+        await transcriber.close()
         log.info("page disconnected")

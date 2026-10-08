@@ -73,7 +73,10 @@ red-dot/                              the React app (Vite, TypeScript)
         ├── server.py                 /healthz and /ws, origin check, logging
         ├── speech_check.py           is this 100 ms chunk speech?
         ├── utterances.py             cuts the stream into utterances
+        ├── transcriber.py            optional: streams each press to RecordingToText, logs the text
         └── requirements.txt
+recording-to-text/                    RecordingToText: one interface to several speech-to-text
+                                      services (Google, Whisper); see its README
 docs/screenshot.png
 ```
 
@@ -102,6 +105,22 @@ cd red-dot/src/components/RedDotCode/redDotServer && .venv/bin/uvicorn server:ap
 ```
 
 The terminal shows one log line per 100 ms chunk while you talk, and every utterance. Locally, each utterance is also saved as a WAV file in `debug-audio/` (see [Configuration](#configuration)).
+
+**Optional: speech-to-text.** To see the text of what you say in this terminal, start
+RecordingToText first (another terminal; setup in [recording-to-text/README.md](recording-to-text/README.md)):
+
+```bash
+cd recording-to-text && .venv/bin/uvicorn recording_to_text.server:app --port 8092
+```
+
+and start the backend with its address (and, for live partial text, Google's `long` model):
+
+```bash
+cd red-dot/src/components/RedDotCode/redDotServer && RECORDING_TO_TEXT_URL=ws://localhost:8092/stream RTT_MODEL=long .venv/bin/uvicorn server:app --port 8090
+```
+
+Lines starting with `>>>` are the text: `partial` while you speak, `FINAL` with confidence and
+language once it's settled.
 
 ### 3. Start the frontend (terminal 2)
 
@@ -132,6 +151,10 @@ There are no automated tests yet. `npm run build` type-checks the frontend (`tsc
 | `DEBUG_AUDIO_DIR` | `debug-audio` | where every utterance is saved as a WAV file; **empty: save nothing** (use that in production) |
 | `VAD_MIN_RMS` | `200` | how loud a chunk must be to count as speech (16-bit scale; speech is typically 1000–5000) |
 | `VAD_MODE` | `3` | WebRTC VAD strictness, 0 (lenient) to 3 (strictest) |
+| `RECORDING_TO_TEXT_URL` | – (off) | RecordingToText's `/stream` WebSocket, e.g. `ws://localhost:8092/stream`; each press is streamed there and the text is logged |
+| `RTT_SERVICE` | `google` | which RecordingToText service transcribes |
+| `RTT_LANGUAGE` | `de-DE` | the spoken language; `none`: the service detects it |
+| `RTT_MODEL` | – (the service's default) | e.g. `long` for Google's live partial results; `chirp_2` (default) only answers at the end |
 
 **Frontend** (build time): `VITE_BACKEND_URL` in `red-dot/.env.production`, the backend's public address, e.g. `https://api.example.com`. Leave it unset for development: the page then uses its own address and Vite's proxy forwards `/ws` and `/healthz` to `localhost:8090`.
 
@@ -213,7 +236,7 @@ The frontend is a static site; the backend is a small Python service behind a re
 
 ## Roadmap
 
-- **Agents behind one interface.** Every finished utterance is a self-contained recording. The next step is a small interface for "processors" that take a recording and return a result (a transcript, a reply, an action), so that different speech-to-text engines (e.g. Google Cloud Speech-to-Text, Gemini, Whisper) and agents built on them can be plugged in and swapped without touching the UI.
+- **Agents behind one interface** (in progress: [RecordingToText](recording-to-text/README.md) does this for speech-to-text). Every finished utterance is a self-contained recording. The next step is a small interface for "processors" that take a recording and return a result (a transcript, a reply, an action), so that different speech-to-text engines (e.g. Google Cloud Speech-to-Text, Gemini, Whisper) and agents built on them can be plugged in and swapped without touching the UI.
 - **Side-by-side comparison.** Send the same utterance to several processors at once and show their results, timings and confidence next to its line.
 - **Speech detection in the browser.** Running voice activity detection locally (e.g. Silero VAD in WebAssembly) would make the dot react instantly and keep audio on the device, with the backend only needed for the agents.
 - **Persistence.** Lines currently live in the page and disappear on reload.
@@ -221,3 +244,7 @@ The frontend is a static site; the backend is a small Python service behind a re
 ## Privacy
 
 Recordings stay in the browser's memory and are gone when the page is closed. The backend receives the audio only to judge it chunk by chunk; it doesn't store it unless `DEBUG_AUDIO_DIR` is set, which is the default for local development only. Set `DEBUG_AUDIO_DIR=` (empty) on any server other people use.
+
+With `RECORDING_TO_TEXT_URL` set, the audio of each press also goes to RecordingToText, and from
+there to the chosen speech-to-text service (Google Cloud or OpenAI), which processes it under its
+own terms.

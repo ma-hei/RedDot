@@ -54,7 +54,7 @@ async def main() -> int:
         for path in args.files:
             try:
                 recording = read_wav(path)
-            except (OSError, EOFError, ServiceError) as e:
+            except (OSError, ServiceError) as e:
                 print(f"{path.name}: can't read it ({e})", file=sys.stderr)
                 failed = True
                 continue

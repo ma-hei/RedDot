@@ -11,11 +11,14 @@ from .types import Recording, ServiceError
 
 def read_wav(source: str | Path | bytes) -> Recording:
     """A WAV file (path or the file's bytes) as a Recording. Only 16-bit mono is accepted."""
-    with wave.open(io.BytesIO(source) if isinstance(source, bytes) else str(source), "rb") as w:
-        if w.getnchannels() != 1 or w.getsampwidth() != 2:
-            raise ServiceError(f"expected 16-bit mono audio, got {w.getnchannels()} channel(s) "
-                               f"of {8 * w.getsampwidth()} bit")
-        return Recording(w.readframes(w.getnframes()), w.getframerate())
+    try:
+        with wave.open(io.BytesIO(source) if isinstance(source, bytes) else str(source), "rb") as w:
+            if w.getnchannels() != 1 or w.getsampwidth() != 2:
+                raise ServiceError(f"expected 16-bit mono audio, got {w.getnchannels()} channel(s) "
+                                   f"of {8 * w.getsampwidth()} bit")
+            return Recording(w.readframes(w.getnframes()), w.getframerate())
+    except (wave.Error, EOFError) as e:
+        raise ServiceError(f"not a readable WAV file ({e})") from e
 
 
 def to_wav(recording: Recording) -> bytes:

@@ -12,7 +12,8 @@ settings, not this code:
 WHISPER_API_KEY falls back to OPENAI_API_KEY.
 
 Language: a bare language code ("de"); "de-DE" is shortened to "de". language=None sends none,
-and Whisper detects it; the detected language comes back in Transcript.language.
+and Whisper detects it. Whisper names the language it heard ("german"); Transcript.language has
+it as a code ("de"), like the other services.
 
 Confidence: Whisper reports no confidence directly. For each segment it reports the average
 log-probability of its tokens (avg_logprob); exp() of that is the average probability per token,
@@ -94,8 +95,7 @@ class Whisper(Service):
         return Transcript(
             text=(body.get("text") or "").strip(),
             confidence=confidence,
-            # Whisper names the language it detected ("german"); a requested language is a code.
-            language=body.get("language") or params.language,
+            language=_language_code(body.get("language")) or params.language,
             service=self.name,
             model=model,
             latency_ms=latency_ms,
@@ -121,6 +121,31 @@ def _from_segments(segments: list[dict]) -> tuple[float | None, dict]:
     confidence = sum(w * math.exp(s.get("avg_logprob", 0.0)) for w, s in zip(weights, segments)) / sum(weights)
     extras["no_speech_prob"] = max(s.get("no_speech_prob", 0.0) for s in segments)
     return confidence, extras
+
+
+# Whisper's language names and their codes (the list in openai/whisper, tokenizer.py).
+_CODES = dict(pair.split(":") for pair in (
+    "english:en chinese:zh german:de spanish:es russian:ru korean:ko french:fr japanese:ja portuguese:pt "
+    "turkish:tr polish:pl catalan:ca dutch:nl arabic:ar swedish:sv italian:it indonesian:id hindi:hi "
+    "finnish:fi vietnamese:vi hebrew:he ukrainian:uk greek:el malay:ms czech:cs romanian:ro danish:da "
+    "hungarian:hu tamil:ta norwegian:no thai:th urdu:ur croatian:hr bulgarian:bg lithuanian:lt latin:la "
+    "maori:mi malayalam:ml welsh:cy slovak:sk telugu:te persian:fa latvian:lv bengali:bn serbian:sr "
+    "azerbaijani:az slovenian:sl kannada:kn estonian:et macedonian:mk breton:br basque:eu icelandic:is "
+    "armenian:hy nepali:ne mongolian:mn bosnian:bs kazakh:kk albanian:sq swahili:sw galician:gl marathi:mr "
+    "punjabi:pa sinhala:si khmer:km shona:sn yoruba:yo somali:so afrikaans:af occitan:oc georgian:ka "
+    "belarusian:be tajik:tg sindhi:sd gujarati:gu amharic:am yiddish:yi lao:lo uzbek:uz faroese:fo "
+    "haitian_creole:ht pashto:ps turkmen:tk nynorsk:nn maltese:mt sanskrit:sa luxembourgish:lb myanmar:my "
+    "tibetan:bo tagalog:tl malagasy:mg assamese:as tatar:tt hawaiian:haw lingala:ln hausa:ha bashkir:ba "
+    "javanese:jw sundanese:su cantonese:yue"
+).split())
+
+
+def _language_code(name: str | None) -> str | None:
+    """"german" -> "de". Codes pass through; an unknown name is kept as it is."""
+    if not name:
+        return None
+    key = name.strip().lower().replace(" ", "_")
+    return _CODES.get(key, name)
 
 
 def _error_message(response: httpx.Response) -> str:
