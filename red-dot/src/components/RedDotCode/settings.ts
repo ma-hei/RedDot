@@ -2,6 +2,7 @@
 // No React here. The choices are remembered in the browser (localStorage).
 
 import type { TranscriptionSettings } from './link.ts'
+import { TEXT } from './uiText.ts'
 
 export type Mode = TranscriptionSettings['mode']
 
@@ -14,12 +15,9 @@ export interface Engine {
   detectsLanguage: boolean   // works without a language
 }
 
-export const MODES: { id: Mode; label: string; hint: string }[] = [
-  { id: 'recording', label: 'Per utterance', hint: 'transcribe on speech pause' },
-  { id: 'stream', label: 'Live', hint: 'transcribe immediately' },
-  { id: 'press', label: 'Per press', hint: 'transcribe when letting go of dot' },
-  { id: 'off', label: 'Off', hint: 'no speech-to-text' },
-]
+// In the order the menu shows them; the texts are in uiText.ts (English or German).
+export const MODES: { id: Mode; label: string; hint: string }[] =
+  (['recording', 'stream', 'press', 'off'] as const).map((id) => ({ id, ...TEXT.modes[id] }))
 
 export const ENGINES: Engine[] = [
   { id: 'google-long', label: 'Google long', service: 'google', model: 'long', streams: true, detectsLanguage: false },
@@ -27,11 +25,8 @@ export const ENGINES: Engine[] = [
   { id: 'whisper', label: 'Whisper', service: 'whisper', model: null, streams: false, detectsLanguage: true },
 ]
 
-export const LANGUAGES: { id: string; label: string }[] = [
-  { id: 'de-DE', label: 'German' },
-  { id: 'en-US', label: 'English' },
-  { id: 'none', label: 'Detect' },
-]
+export const LANGUAGES: { id: string; label: string }[] =
+  ['de-DE', 'en-US', 'none'].map((id) => ({ id, label: TEXT.languages[id] }))
 
 /** What the panel shows: ids from the lists above. */
 export interface Choice {

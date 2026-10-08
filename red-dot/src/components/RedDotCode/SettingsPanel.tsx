@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { ENGINES, LANGUAGES, MODES, alwaysOnAllowed, engineAllowed, fixChoice, languageAllowed } from './settings.ts'
 import type { Choice } from './settings.ts'
+import { TEXT } from './uiText.ts'
 
 export interface SettingsPanelProps {
   choice: Choice
@@ -18,14 +19,14 @@ export default function SettingsPanel({ choice, onChange, available, error }: Se
   return (
     <div className="reddot-settings">
       {open && (
-        <div className="panel" role="dialog" aria-label="Speech-to-text settings">
-          <h2>Speech-to-text</h2>
+        <div className="panel" role="dialog" aria-label={TEXT.title}>
+          <h2>{TEXT.title}</h2>
           {available === false ? (
-            <p className="note">Off on the server: start the backend with RECORDING_TO_TEXT_URL set.</p>
+            <p className="note">{TEXT.serverOff}</p>
           ) : (
             <>
               <fieldset>
-                <legend>Mode</legend>
+                <legend>{TEXT.mode}</legend>
                 {MODES.map((m) => (
                   <label key={m.id} title={m.hint}>
                     <input type="radio" name="mode" checked={choice.mode === m.id} onChange={() => set({ mode: m.id })} />
@@ -33,20 +34,19 @@ export default function SettingsPanel({ choice, onChange, available, error }: Se
                   </label>
                 ))}
                 <label className={`checkbox${alwaysOnAllowed(choice.mode) ? '' : ' unavailable'}`}
-                       title={alwaysOnAllowed(choice.mode) ? '' : 'only with Per utterance or Live'}>
+                       title={alwaysOnAllowed(choice.mode) ? '' : TEXT.alwaysOnUnavailable}>
                   <input type="checkbox" checked={choice.alwaysOn && alwaysOnAllowed(choice.mode)}
                          disabled={!alwaysOnAllowed(choice.mode)} onChange={(e) => set({ alwaysOn: e.target.checked })} />
-                  Dot always on <span className="hint">
-                    {choice.mode === 'stream' ? 'listens without holding; click the dot for a new line'
-                      : 'record while holding'}
+                  {TEXT.alwaysOn} <span className="hint">
+                    {choice.mode === 'stream' ? TEXT.alwaysOnHint.stream : TEXT.alwaysOnHint.recording}
                   </span>
                 </label>
               </fieldset>
               <fieldset disabled={choice.mode === 'off'}>
-                <legend>Service</legend>
+                <legend>{TEXT.service}</legend>
                 {ENGINES.map((e) => (
                   <label key={e.id} className={engineAllowed(e, choice.mode) ? '' : 'unavailable'}
-                         title={engineAllowed(e, choice.mode) ? '' : "can't stream: only per utterance or per press"}>
+                         title={engineAllowed(e, choice.mode) ? '' : TEXT.engineUnavailable}>
                     <input type="radio" name="engine" checked={choice.engine === e.id}
                            disabled={!engineAllowed(e, choice.mode)} onChange={() => set({ engine: e.id })} />
                     {e.label}
@@ -54,10 +54,10 @@ export default function SettingsPanel({ choice, onChange, available, error }: Se
                 ))}
               </fieldset>
               <fieldset disabled={choice.mode === 'off'}>
-                <legend>Language</legend>
+                <legend>{TEXT.language}</legend>
                 {LANGUAGES.map((l) => (
                   <label key={l.id} className={languageAllowed(l.id, choice) ? '' : 'unavailable'}
-                         title={languageAllowed(l.id, choice) ? '' : "this service can't detect the language"}>
+                         title={languageAllowed(l.id, choice) ? '' : TEXT.languageUnavailable}>
                     <input type="radio" name="language" checked={choice.language === l.id}
                            disabled={!languageAllowed(l.id, choice)} onChange={() => set({ language: l.id })} />
                     {l.label}
@@ -70,7 +70,7 @@ export default function SettingsPanel({ choice, onChange, available, error }: Se
         </div>
       )}
       <button type="button" className={`toggle${error ? ' has-error' : ''}`} aria-expanded={open}
-              aria-label="Speech-to-text settings" title="Speech-to-text settings" onClick={() => setOpen(!open)}>
+              aria-label={TEXT.title} title={TEXT.title} onClick={() => setOpen(!open)}>
         <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
           {/* three sliders */}
           <path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />

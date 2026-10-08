@@ -76,6 +76,7 @@ red-dot/                              the React app (Vite, TypeScript)
     ├── lineLabels.ts                 the text under each line (HTML over the canvas)
     ├── SettingsPanel.tsx             the settings button and panel (speech-to-text)
     ├── settings.ts                   what the panel offers, remembered in the browser
+    ├── uiText.ts                     the panel's texts in English and German (VITE_UI_LANGUAGE)
     ├── link.ts                       WebSocket, microphone, chunk store, recordings
     ├── useVoiceLink.ts               React hook around link.ts
     └── redDotServer/                 the backend (FastAPI)
@@ -163,7 +164,12 @@ There are no automated tests yet. `npm run build` type-checks the frontend (`tsc
 | `VAD_MODE` | `3` | WebRTC VAD strictness, 0 (lenient) to 3 (strictest) |
 | `RECORDING_TO_TEXT_URL` | – (off) | where RecordingToText runs, e.g. `http://localhost:8092`; empty: no speech-to-text. Service, model and language are chosen on the page |
 
-**Frontend** (build time): `VITE_BACKEND_URL` in `red-dot/.env.production`, the backend's public address, e.g. `https://api.example.com`. Leave it unset for development: the page then uses its own address and Vite's proxy forwards `/ws` and `/healthz` to `localhost:8090`.
+**Frontend** (build time, in `red-dot/.env.production`; for development in `red-dot/.env.local`, which git ignores, or in front of the command, e.g. `VITE_UI_LANGUAGE=de npm run dev`). Vite writes the values into the built page; they can't be changed in the page itself.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `VITE_BACKEND_URL` | – (the page's own address) | the backend's public address, e.g. `https://api.example.com`. Leave it unset for development: Vite's proxy forwards `/ws` and `/healthz` to `localhost:8090` |
+| `VITE_UI_LANGUAGE` | `en` | the settings menu's language: `de` for German, otherwise English (`uiText.ts` has the texts) |
 
 ## Deployment
 
@@ -209,10 +215,10 @@ The frontend is a static site; the backend is a small Python service behind a re
 
 ### Frontend
 
-1. Set the backend's address and build:
+1. Set the backend's address and the menu's language (`de` or leave it out for English), and build:
 
    ```bash
-   cd red-dot && echo "VITE_BACKEND_URL=https://api.example.com" > .env.production && npm run build
+   cd red-dot && printf 'VITE_BACKEND_URL=https://api.example.com\nVITE_UI_LANGUAGE=de\n' > .env.production && npm run build
    ```
 
 2. Upload `red-dot/dist/` to the web server's document root.
