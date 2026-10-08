@@ -6,15 +6,12 @@ stream. One press is one stream. What comes back is only logged, in this termina
 
     >>> google/long        partial          Hallo wie
     >>> google/long        FINAL 0.98 de-DE Hallo, wie geht es dir?
-    >>> whisper/whisper-1  FINAL 0.53 de    Ja, also ich wollte nur mal sagen...
-
-Services that can't stream (whisper) give one FINAL line per utterance, after each pause.
 
 If RecordingToText can't be reached or fails, the dot keeps working; the log says why.
 
 Settings (environment):
     RECORDING_TO_TEXT_URL    where its /stream WebSocket is; empty: off (the default)
-    RTT_SERVICE              google (default) or another service RecordingToText offers
+    RTT_SERVICE              google (default); a service that can stream (not whisper)
     RTT_LANGUAGE             de-DE (default); none: the service detects the language
     RTT_MODEL                the service's model; empty: its default (google: chirp_2)
 """

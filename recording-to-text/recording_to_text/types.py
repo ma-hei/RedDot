@@ -63,8 +63,7 @@ class Transcript:
 class Capabilities:
     """What a service can do, so callers (and the UI) know what to expect."""
 
-    streaming: bool              # native streaming with partial results; otherwise mode 1 gives
-                                 # one final result per utterance
+    streaming: bool              # can stream (mode 1); otherwise whole recordings only (mode 2)
     confidence: bool             # reports a confidence for the text
     word_times: bool             # start/end of each word
     language_detection: bool     # works with language=None
