@@ -21,3 +21,84 @@
   overflow: hidden;
   background: #09090b;   /* the canvas background, also while the page loads */
 }
+
+/* The canvas, the text under the lines, and the settings: stacked in one box. */
+.reddot-wrap {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+/* ---- the text under each line (lineLabels.ts places each one) ---- */
+.reddot-labels {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;  /* taps and drags go through to the canvas */
+}
+.reddot-label {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: max-content;
+  color: #e4e4e7;
+  font: 15px/1.35 system-ui, -apple-system, "Segoe UI", sans-serif;
+  text-align: center;
+  overflow-wrap: anywhere;
+  text-shadow: 0 1px 3px #09090b;
+  transition: opacity 0.2s;
+}
+.reddot-label.partial { opacity: 0.6; font-style: italic; }   /* may still change */
+.reddot-label.empty { opacity: 0.45; }                       /* "…" or "–" */
+.reddot-label .confidence {
+  margin-left: 0.5em;
+  font-size: 0.75em;
+  color: #a1a1aa;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- the settings button and panel (SettingsPanel.tsx), bottom right ---- */
+.reddot-settings {
+  position: absolute;
+  right: 16px;
+  bottom: 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: #e4e4e7;
+}
+.reddot-settings .toggle {
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  border: 1px solid #3f3f46;
+  border-radius: 50%;
+  background: #18181bcc;
+  color: #a1a1aa;
+  cursor: pointer;
+}
+.reddot-settings .toggle:hover,
+.reddot-settings .toggle[aria-expanded="true"] { color: #fafafa; border-color: #71717a; }
+.reddot-settings .toggle.has-error { border-color: #f87171; color: #f87171; }
+.reddot-settings .panel {
+  width: min(280px, calc(100vw - 32px));
+  max-height: calc(100vh - 80px);
+  overflow: auto;
+  padding: 12px 14px;
+  border: 1px solid #3f3f46;
+  border-radius: 10px;
+  background: #18181bf2;
+}
+.reddot-settings h2 { margin: 0 0 8px; font-size: 14px; font-weight: 600; }
+.reddot-settings fieldset { margin: 0 0 10px; padding: 0; border: 0; }
+.reddot-settings fieldset:disabled { opacity: 0.4; }
+.reddot-settings legend { padding: 0; margin-bottom: 4px; color: #a1a1aa; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
+.reddot-settings label { display: block; padding: 2px 0; cursor: pointer; }
+.reddot-settings label.unavailable { opacity: 0.4; cursor: default; }
+.reddot-settings input { margin: 0 8px 0 0; accent-color: #ef4444; }
+.reddot-settings .hint { color: #71717a; font-size: 12px; }
+.reddot-settings .note { margin: 0; color: #a1a1aa; font-size: 12px; }
+.reddot-settings .error { margin: 8px 0 0; color: #f87171; font-size: 12px; overflow-wrap: anywhere; }

@@ -57,9 +57,10 @@ The protocol is described in full at the top of `recording_to_text/server.py`. O
 carry any number of streams, one after another. There's no access check yet: localhost only until
 it's deployed (step 7).
 
-The red dot's backend is the first client: with `RECORDING_TO_TEXT_URL=ws://localhost:8092/stream`
-it streams each press of the dot here and logs the text (see `transcriber.py` there and the main
-README).
+The red dot is the first client: with `RECORDING_TO_TEXT_URL=http://localhost:8092`, its backend
+sends the dot's audio here (a stream per press in mode 1, a recording per line in mode 2, as chosen
+in the page's settings) and shows the text under the lines (see `transcriber.py` there and the
+main README).
 
 ## Services
 

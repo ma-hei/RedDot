@@ -1,7 +1,7 @@
 // The utterance lines: one per finished utterance, each holding that utterance's audio.
 // No React and no WebGL here: the component creates and moves lines, the renderer draws them.
 //
-//   addLine(lines, createLine(recording, placeNewLine(lines, dotCenter, dotRadius, size)))
+//   addLine(lines, createLine(key, recording, placeNewLine(lines, dotCenter, dotRadius, size)))
 //   const line = lineAt(lines, x, y, size)    // what's under the pointer (topmost first)
 //   playLine(line)                            // play its audio; line.playing is true meanwhile
 //   advanceLines(lines, dt)                   // every frame: move the waves
@@ -13,11 +13,20 @@ export const MAX_LINES = 24  // the renderer draws at most this many; older line
 
 export interface UtteranceLine {
   id: number
+  key: number                     // the server's name for it: its first chunk number (link.ts)
   center: [x: number, y: number]  // share of the canvas, like the dot ([0.5, 0.5] = middle, y from the top)
   recording: Recording
   phase: number                   // where the wave is; advanced every frame (starts random, so lines differ)
   playing: boolean
   glow: number                    // 0..1, eased towards 1 while playing (the renderer uses it)
+  text: LineText | null           // speech-to-text, if it's switched on (lineLabels.ts shows it)
+}
+
+/** What speech-to-text made of a line (or of the line still being spoken). */
+export interface LineText {
+  text: string                    // "" while waiting for the first result
+  final: boolean                  // false: may still change
+  confidence: number | null       // 0..1, if the service reports one
 }
 
 /** The canvas size in CSS pixels. */
@@ -28,8 +37,8 @@ export interface Size {
 
 let nextId = 1
 
-export function createLine(recording: Recording, center: [number, number]): UtteranceLine {
-  return { id: nextId++, center, recording, phase: Math.random() * 2 * Math.PI, playing: false, glow: 0 }
+export function createLine(key: number, recording: Recording, center: [number, number]): UtteranceLine {
+  return { id: nextId++, key, center, recording, phase: Math.random() * 2 * Math.PI, playing: false, glow: 0, text: null }
 }
 
 /** Add a line, dropping the oldest if there are too many. */
@@ -52,7 +61,7 @@ function unit(size: Size): number {
 }
 
 /** Half the line's size in CSS pixels: [half length, half height incl. the wave]. */
-function halfExtent(size: Size): [number, number] {
+export function halfExtent(size: Size): [number, number] {
   const u = unit(size)
   return [LINE.halfLength * u, (LINE.amplitude * LINE.playing.amplitude + LINE.thickness) * u]
 }

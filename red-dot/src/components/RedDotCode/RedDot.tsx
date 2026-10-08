@@ -1,13 +1,17 @@
-import { useCallback, useEffect, useRef } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { PointerEvent } from 'react'
+import { createLabels } from './lineLabels.ts'
 import { LOOKS, advance, createOrbState } from './looks.ts'
 import type { Look, LookName, OrbState } from './looks.ts'
 import type { LinkStatus } from './link.ts'
+import SettingsPanel from './SettingsPanel.tsx'
+import { loadChoice, saveChoice, toSettings } from './settings.ts'
+import type { Choice } from './settings.ts'
 import { createOrbRenderer as createSdfRenderer } from './renderer.ts'
 import { createOrbRenderer as createMeshRenderer } from './rendererMesh.ts'
 import { useVoiceLink } from './useVoiceLink.ts'
 import { addLine, advanceLines, bringToFront, clampLine, createLine, lineAt, placeNewLine, playLine } from './utteranceLines.ts'
-import type { Size, UtteranceLine } from './utteranceLines.ts'
+import type { LineText, Size, UtteranceLine } from './utteranceLines.ts'
 import './RedDot.css'
 
 // Two renderers draw the same picture: renderer.ts (one shader computes every pixel, the
@@ -35,20 +39,46 @@ export interface RedDotProps {
 
 export default function RedDot({ onStatusChange }: RedDotProps) {
 	
+  	// ---- speech-to-text: the settings (⚙), and the text of the line still being spoken ----
+  	const [choice, setChoice] = useState<Choice>(loadChoice)
+  	const choiceRef = useRef(choice)       // for the animation loop, which runs outside React
+  	const [available, setAvailable] = useState<boolean | null>(null)
+  	const [textError, setTextError] = useState<string | null>(null)
+  	const pending = useRef<LineText | null>(null)
+  	// Text for a line that doesn't exist yet (in case it arrives first), by the line's key.
+  	const early = useRef(new Map<number, LineText>())
+
   	// ---- the server connection ----
-  	const { status, press, release } = useVoiceLink({
+  	const { status, press, release, configure } = useVoiceLink({
     		onVerdict: (v) => {
       			if (v.speech) orb.current.lastSpeechAt = performance.now()
       			orb.current.level = Math.min(1, v.rms / 3000)
     		},
     		// An utterance is finished: a new line next to the dot, holding its audio.
-    		onRecording: (recording) => {
+    		onRecording: (key, recording) => {
       			const canvas = canvasRef.current
       			if (!canvas) return
       			const size = { width: canvas.clientWidth, height: canvas.clientHeight }
       			const at = placeNewLine(lines.current, orb.current.center, LOOKS.pressed.radius, size)
-      			addLine(lines.current, createLine(recording, at))
+      			const line = createLine(key, recording, at)
+      			line.text = early.current.get(key) ?? null
+      			early.current.delete(key)
+      			addLine(lines.current, line)
     		},
+    		// Speech-to-text: for a line (by its key), or for the one still being spoken (line: null).
+    		onText: ({ line: key, text, final, confidence }) => {
+      			const value = { text, final, confidence }
+      			if (text) setTextError(null)
+      			if (key === null) {
+        				pending.current = value
+        				return
+      			}
+      			const line = lines.current.find((l) => l.key === key)
+      			if (line) line.text = value
+      			else early.current.set(key, value)
+    		},
+    		onTranscription: setAvailable,
+    		onTextError: setTextError,
   	})
 
   	const stopTalking = useCallback(() => {
@@ -64,10 +94,12 @@ export default function RedDot({ onStatusChange }: RedDotProps) {
 		const s = orb.current
     		if (s.pressed) return
     		s.pressed = true                  // change the look right away, even while the mic starts
+    		pending.current = null            // a new press: no text yet
     		press().then((ok) => { if (!ok) s.pressed = false })
 	}, [press])
 
   	const canvasRef = useRef<HTMLCanvasElement>(null)
+  	const labelsRef = useRef<HTMLDivElement>(null)   // the text under the lines, over the canvas
   	const orb = useRef<OrbState>(createOrbState())
   	// The utterance lines, oldest first (the last one is drawn on top).
   	const lines = useRef<UtteranceLine[]>([])
@@ -86,11 +118,24 @@ export default function RedDot({ onStatusChange }: RedDotProps) {
     		onStatusChange?.(status)
   	}, [status, onStatusChange])
 
+  	// The settings go to the server (again after every reconnect: link.ts) and are remembered.
+  	useEffect(() => {
+    		choiceRef.current = choice
+    		configure(toSettings(choice))
+    		saveChoice(choice)
+  	}, [choice, configure])
+  	const changeChoice = useCallback((next: Choice) => {
+    		setChoice(next)
+    		setTextError(null)   // a problem with the old settings doesn't apply to the new ones
+  	}, [])
+
   	// ---- the animation loop: starts when the canvas appears, stops when it goes away ----
   	useEffect(() => {
     		const canvas = canvasRef.current
-    		if (!canvas) return                     // React sets the ref before effects run; this satisfies TypeScript
+    		const labelBox = labelsRef.current
+    		if (!canvas || !labelBox) return        // React sets the refs before effects run; this satisfies TypeScript
     		const renderer = createOrbRenderer(canvas)
+    		const labels = createLabels(labelBox)
     		let frameId = 0
     		let last = performance.now()
     		const frame = (now: number) => {
@@ -99,6 +144,14 @@ export default function RedDot({ onStatusChange }: RedDotProps) {
       			advance(orb.current, dt, now)
       			advanceLines(lines.current, dt)
       			renderer.draw(orb.current.look, orb.current.phase, orb.current.center, lines.current)
+      			// The text of the line being spoken, where that line will appear (live mode only):
+      			// "…" while the dot is held, then the service's guesses until the line exists.
+      			const size = { width: canvas.clientWidth, height: canvas.clientHeight }
+      			const live = choiceRef.current.mode === 'stream'
+      			const text = pending.current?.text ? pending.current : orb.current.pressed ? { text: '', final: false, confidence: null } : null
+      			labels.sync(lines.current, live && text ? {
+        				text, at: placeNewLine(lines.current, orb.current.center, LOOKS.pressed.radius, size),
+      			} : null, size)
       			frameId = requestAnimationFrame(frame)
     		}
     		frameId = requestAnimationFrame(frame)
@@ -106,11 +159,14 @@ export default function RedDot({ onStatusChange }: RedDotProps) {
     		return () => {
       			cancelAnimationFrame(frameId)
       			renderer.dispose()
+      			labels.dispose()
     		}
   	}, [])
 
   	useEffect(() => {
-    		const isTalkKey = (e: KeyboardEvent) => e.key.toLowerCase() === 'r' && !e.ctrlKey && !e.metaKey && !e.altKey
+    		// Not while typing or choosing in the settings panel.
+    		const inForm = (e: KeyboardEvent) => e.target instanceof HTMLElement && e.target.closest('input, select, textarea, button') !== null
+    		const isTalkKey = (e: KeyboardEvent) => e.key.toLowerCase() === 'r' && !e.ctrlKey && !e.metaKey && !e.altKey && !inForm(e)
     		const onKeyDown = (e: KeyboardEvent) => { if (isTalkKey(e) && !e.repeat) startTalking() }
     		const onKeyUp = (e: KeyboardEvent) => { if (e.key.toLowerCase() === 'r') stopTalking() }
     		document.addEventListener('keydown', onKeyDown)
@@ -188,6 +244,7 @@ export default function RedDot({ onStatusChange }: RedDotProps) {
   	}
 
 	return (
+    		<div className="reddot-wrap">
     		<canvas
       			ref={canvasRef}
       			className="reddot"
@@ -224,5 +281,8 @@ export default function RedDot({ onStatusChange }: RedDotProps) {
         			else e.currentTarget.style.cursor = isOnSomething(e) ? 'grab' : 'default'
       			}}
     		/>
+    		<div ref={labelsRef} className="reddot-labels" aria-live="polite" />
+    		<SettingsPanel choice={choice} onChange={changeChoice} available={available} error={available === false ? null : textError} />
+    		</div>
   	)
 };

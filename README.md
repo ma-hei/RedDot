@@ -12,6 +12,7 @@ The goal of the project is a **testbed for AI agents that process voice recordin
 - **Live speech detection:** a backend judges every 100 ms of audio (loudness + WebRTC voice activity detection); the dot turns a more intense red, glows and moves faster while speech is heard.
 - **Utterances:** the audio is cut into utterances at pauses (0.7 s of quiet), when you let go, or after 15 s.
 - **Utterance lines:** each utterance becomes a wavy line next to the dot. Tap it to play it back, drag it to arrange your utterances.
+- **Speech-to-text (optional):** the text of each utterance appears under its line, with the service's confidence. **Live** (mode 1): while you speak, the text appears where the next line will be and is revised as you go; when the line appears, the text moves onto it and settles once you let go. **Per recording** (mode 2): each line gets its text when it ends. Service (Google long, Google chirp_2, Whisper) and language (German, English, detect) are chosen with the small settings button in the corner; it goes through [RecordingToText](recording-to-text/README.md).
 - **Draggable dot:** pick up the dot while recording and move it around.
 - **Full-screen WebGL:** the dot and lines are drawn by a fragment shader, on desktop and mobile.
 - **Private by design:** recordings stay in the browser. The backend only judges the audio, and saves nothing unless debug recording is switched on.
@@ -52,6 +53,10 @@ flowchart LR
 | page → server | binary, 3200 bytes | 100 ms of 16 kHz 16-bit mono PCM, only while pressed |
 | server → page | `{"type": "verdict", "speech": bool, "rms": int}` | one per chunk |
 | server → page | `{"type": "utterance", "event": "ended", "first": n, "last": m, "seconds": s}` | an utterance consists of the chunks numbered `first..last` (counted from 1 per connection) |
+| page → server | `{"type": "settings", "mode": "stream" \| "recording" \| "off", "service": ..., "model": ..., "language": ... \| null}` | speech-to-text settings; sent on connect and on every change, apply from the next press |
+| server → page | `{"type": "transcription", "available": bool}` | once on connect: whether the backend has RecordingToText |
+| server → page | `{"type": "text", "line": n \| null, "text": ..., "final": bool, "confidence": c \| null}` | the text for the line whose first chunk is `n`, or (`null`) for the line still being spoken; `final: false` while it can change |
+| server → page | `{"type": "text_error", "message": ...}` | a speech-to-text problem, shown in the settings |
 
 `GET /healthz` answers `{"ok": true}`; the page polls it while the backend is unreachable before opening the WebSocket (Firefox slows down repeated failed WebSocket attempts).
 
@@ -67,13 +72,16 @@ red-dot/                              the React app (Vite, TypeScript)
     ├── looks.ts                      the dot's and the lines' look (design them here)
     ├── renderer.ts                   WebGL2: one full-screen shader draws everything
     ├── utteranceLines.ts             utterance lines: placement, hit testing, playback
+    ├── lineLabels.ts                 the text under each line (HTML over the canvas)
+    ├── SettingsPanel.tsx             the settings button and panel (speech-to-text)
+    ├── settings.ts                   what the panel offers, remembered in the browser
     ├── link.ts                       WebSocket, microphone, chunk store, recordings
     ├── useVoiceLink.ts               React hook around link.ts
     └── redDotServer/                 the backend (FastAPI)
         ├── server.py                 /healthz and /ws, origin check, logging
         ├── speech_check.py           is this 100 ms chunk speech?
         ├── utterances.py             cuts the stream into utterances
-        ├── transcriber.py            optional: streams each press to RecordingToText, logs the text
+        ├── transcriber.py            optional: speech-to-text through RecordingToText, text to the lines
         └── requirements.txt
 recording-to-text/                    RecordingToText: one interface to several speech-to-text
                                       services (Google, Whisper); see its README
@@ -106,21 +114,22 @@ cd red-dot/src/components/RedDotCode/redDotServer && .venv/bin/uvicorn server:ap
 
 The terminal shows one log line per 100 ms chunk while you talk, and every utterance. Locally, each utterance is also saved as a WAV file in `debug-audio/` (see [Configuration](#configuration)).
 
-**Optional: speech-to-text.** To see the text of what you say in this terminal, start
+**Optional: speech-to-text.** To see the text of what you say under the lines, start
 RecordingToText first (another terminal; setup in [recording-to-text/README.md](recording-to-text/README.md)):
 
 ```bash
 cd recording-to-text && .venv/bin/uvicorn recording_to_text.server:app --port 8092
 ```
 
-and start the backend with its address (and, for live partial text, Google's `long` model):
+and start the backend with its address:
 
 ```bash
-cd red-dot/src/components/RedDotCode/redDotServer && RECORDING_TO_TEXT_URL=ws://localhost:8092/stream RTT_MODEL=long .venv/bin/uvicorn server:app --port 8090
+cd red-dot/src/components/RedDotCode/redDotServer && RECORDING_TO_TEXT_URL=http://localhost:8092 .venv/bin/uvicorn server:app --port 8090
 ```
 
-Lines starting with `>>>` are the text: `partial` while you speak, `FINAL` with confidence and
-language once it's settled.
+Choose mode, service and language with the settings button in the bottom right corner of the
+page (default: Live, Google long, German). The backend's terminal also logs the text, in lines
+starting with `>>>`.
 
 ### 3. Start the frontend (terminal 2)
 
@@ -151,10 +160,7 @@ There are no automated tests yet. `npm run build` type-checks the frontend (`tsc
 | `DEBUG_AUDIO_DIR` | `debug-audio` | where every utterance is saved as a WAV file; **empty: save nothing** (use that in production) |
 | `VAD_MIN_RMS` | `200` | how loud a chunk must be to count as speech (16-bit scale; speech is typically 1000–5000) |
 | `VAD_MODE` | `3` | WebRTC VAD strictness, 0 (lenient) to 3 (strictest) |
-| `RECORDING_TO_TEXT_URL` | – (off) | RecordingToText's `/stream` WebSocket, e.g. `ws://localhost:8092/stream`; each press is streamed there and the text is logged |
-| `RTT_SERVICE` | `google` | which RecordingToText service transcribes; it must be able to stream (`google`, not `whisper`) |
-| `RTT_LANGUAGE` | `de-DE` | the spoken language; `none`: the service detects it |
-| `RTT_MODEL` | – (the service's default) | e.g. `long` for Google's live partial results; `chirp_2` (default) only answers at the end |
+| `RECORDING_TO_TEXT_URL` | – (off) | where RecordingToText runs, e.g. `http://localhost:8092`; empty: no speech-to-text. Service, model and language are chosen on the page |
 
 **Frontend** (build time): `VITE_BACKEND_URL` in `red-dot/.env.production`, the backend's public address, e.g. `https://api.example.com`. Leave it unset for development: the page then uses its own address and Vite's proxy forwards `/ws` and `/healthz` to `localhost:8090`.
 
@@ -245,6 +251,6 @@ The frontend is a static site; the backend is a small Python service behind a re
 
 Recordings stay in the browser's memory and are gone when the page is closed. The backend receives the audio only to judge it chunk by chunk; it doesn't store it unless `DEBUG_AUDIO_DIR` is set, which is the default for local development only. Set `DEBUG_AUDIO_DIR=` (empty) on any server other people use.
 
-With `RECORDING_TO_TEXT_URL` set, the audio of each press also goes to RecordingToText, and from
+With `RECORDING_TO_TEXT_URL` set and speech-to-text on in the page's settings, the audio of each press also goes to RecordingToText, and from
 there to the chosen speech-to-text service (Google Cloud or OpenAI), which processes it under its
 own terms.

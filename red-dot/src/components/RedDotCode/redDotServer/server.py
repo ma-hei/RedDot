@@ -4,11 +4,12 @@ The browser streams the microphone while the dot (or R) is held; for every 100 m
 the server answers whether it is speech. For debugging, it also cuts the stream into
 utterances (utterances.py) and saves each as a WAV file in DEBUG_AUDIO_DIR.
 
-Speech-to-text is optional and separate: with RECORDING_TO_TEXT_URL set, the audio of each press
-is also streamed to RecordingToText and the text it sends back is logged (transcriber.py).
+Speech-to-text is optional and separate: with RECORDING_TO_TEXT_URL set, the audio also goes to
+RecordingToText, as the page's settings say, and the text comes back to the page for its lines
+(transcriber.py).
 
 Run:   .venv/bin/uvicorn server:app --port 8090
-       RECORDING_TO_TEXT_URL=ws://localhost:8092/stream .venv/bin/uvicorn server:app --port 8090
+       RECORDING_TO_TEXT_URL=http://localhost:8092 .venv/bin/uvicorn server:app --port 8090
        (the port the React dev server forwards to: see ../orb-react/vite.config.ts)
 
 HTTP:
@@ -17,15 +18,20 @@ HTTP:
 WebSocket /ws:
     page -> server  text   {"type": "mic", "on": true|false}   dot/R pressed or released
                     binary 100 ms of 16 kHz 16-bit mono PCM   only while pressed
+                    text   {"type": "settings", "mode": ..., "service": ..., "model": ..., "language": ...}
+                           how to transcribe (see transcriber.py); applies from the next press
     server -> page  text   {"type": "verdict", "speech": bool, "rms": int}   one per chunk
                     text   {"type": "utterance", "event": "ended", "first": n, "last": m, "seconds": s}
                            an utterance is complete: it consists of the chunks numbered first..last
                            (counted from 1 per connection, in the order the page sent them). The page
                            kept those chunks itself, so the audio doesn't travel back.
+                    text   {"type": "transcription", ...}, {"type": "text", ...}, {"type": "text_error", ...}
+                           speech-to-text, see transcriber.py
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -97,7 +103,17 @@ async def ws_endpoint(websocket: WebSocket) -> None:
 
     await websocket.accept()
     log.info("page connected")
-    transcriber = Transcriber()
+    send_lock = asyncio.Lock()  # verdicts come from here, text from the transcriber's own task
+
+    async def send(message: dict) -> None:
+        try:
+            async with send_lock:
+                await websocket.send_text(json.dumps(message, ensure_ascii=False))
+        except (WebSocketDisconnect, RuntimeError):
+            pass  # the page is gone; the loop below notices and cleans up
+
+    transcriber = Transcriber(send)
+    await send({"type": "transcription", "available": Transcriber.available()})
     speech_check = SpeechCheck()
     recorder = UtteranceRecorder()
     talking = False  # the dot (or R) is held
@@ -107,9 +123,10 @@ async def ws_endpoint(websocket: WebSocket) -> None:
         report(ev, why)
         if ev.event == "ended":
             # The utterance is the last ev.chunks chunks received, up to and including this one.
-            await websocket.send_text(json.dumps({"type": "utterance", "event": "ended",
-                                                  "first": chunks - ev.chunks + 1, "last": chunks,
-                                                  "seconds": round(ev.seconds, 1)}))
+            first = chunks - ev.chunks + 1
+            await send({"type": "utterance", "event": "ended", "first": first, "last": chunks,
+                        "seconds": round(ev.seconds, 1)})
+            await transcriber.utterance(first, chunks, ev.audio)
 
     try:
         while True:
@@ -118,19 +135,21 @@ async def ws_endpoint(websocket: WebSocket) -> None:
                 return
             if msg.get("text"):
                 data = json.loads(msg["text"])
-                if data.get("type") == "mic" and bool(data.get("on")) != talking:
+                if data.get("type") == "settings":
+                    transcriber.configure(data)
+                elif data.get("type") == "mic" and bool(data.get("on")) != talking:
                     talking = bool(data.get("on"))
                     if not talking and (ev := recorder.finish()):
                         await utterance_done(ev, " because the dot/R was released")
                     log.info("=== %s ===", "talking" if talking else "not talking")
-                    await (transcriber.start() if talking else transcriber.stop())
+                    await (transcriber.start(chunks) if talking else transcriber.stop())
             elif msg.get("bytes") and talking:
                 chunks += 1
                 await transcriber.chunk(msg["bytes"])
                 c = speech_check.check(msg["bytes"])
                 ev = recorder.feed(msg["bytes"], c.is_speech)
                 log.info(describe(chunks, c, recorder))
-                await websocket.send_text(json.dumps({"type": "verdict", "speech": c.is_speech, "rms": round(c.rms)}))
+                await send({"type": "verdict", "speech": c.is_speech, "rms": round(c.rms)})
                 if ev:
                     await utterance_done(ev)
     except WebSocketDisconnect:

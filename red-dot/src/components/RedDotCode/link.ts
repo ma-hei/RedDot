@@ -1,13 +1,17 @@
 // The connection to the lab server: WebSocket, microphone, push-to-talk. No React.
 //
-//   const link = createLink({ onStatus, onVerdict, onRecording })
+//   const link = createLink({ onStatus, onVerdict, onRecording, onText, onTranscription, onTextError })
 //   await link.press()   // start listening (opens the mic on first use); false if it couldn't
 //   link.release()       // stop listening; the server ends the utterance
+//   link.configure(s)    // speech-to-text settings (kept and sent again after a reconnect)
 //   link.dispose()       // close everything (a React component unmounting)
 //
 // ---------------- the protocol (see server.py) ----------------
 // Page -> server: {"type": "mic", "on": bool} and 100 ms PCM chunks (binary) while pressed.
 // Server -> page: one verdict per chunk, and an "ended" message per finished utterance.
+// Speech-to-text (see transcriber.py): page -> server {"type": "settings", ...}; server -> page
+// "transcription" (available or not), "text" (for a line, or for the one still being spoken),
+// "text_error".
 //
 // Recordings: the page numbers the chunks it sends (from 1 per connection) and keeps the last
 // KEEP_SECONDS of them. When the server says "utterance ended: chunks 12..38", the page
@@ -27,6 +31,23 @@ export interface UtteranceEvent {
   seconds: number
 }
 
+/** Speech-to-text for one line (by its key: the first chunk), or for the line still being spoken (null). */
+export interface TextMessage {
+  type: 'text'
+  line: number | null
+  text: string
+  final: boolean
+  confidence: number | null
+}
+
+/** How the server should transcribe (see transcriber.py and settings.ts). */
+export interface TranscriptionSettings {
+  mode: 'stream' | 'recording' | 'off'
+  service: string
+  model: string | null
+  language: string | null      // null: the service detects it
+}
+
 /** One finished utterance, ready to play: 16-bit mono PCM. */
 export interface Recording {
   pcm: Int16Array
@@ -35,19 +56,26 @@ export interface Recording {
 }
 
 // A "discriminated union": the `type` field tells TypeScript which of the two it is.
-type ServerMessage = Verdict | UtteranceEvent | { type: 'config' | 'partial' | 'transcript' }
+type ServerMessage =
+  | Verdict | UtteranceEvent | TextMessage
+  | { type: 'transcription'; available: boolean }
+  | { type: 'text_error'; message: string }
 
 export type LinkStatus = 'connecting' | 'connected' | 'disconnected' | `microphone blocked: ${string}`
 
 export interface LinkCallbacks {
   onStatus?: (status: LinkStatus) => void
   onVerdict?: (verdict: Verdict) => void
-  onRecording?: (recording: Recording) => void
+  onRecording?: (key: number, recording: Recording) => void  // key: the utterance's first chunk
+  onText?: (text: TextMessage) => void
+  onTranscription?: (available: boolean) => void
+  onTextError?: (message: string) => void
 }
 
 export interface Link {
   press(): Promise<boolean>
   release(): void
+  configure(settings: TranscriptionSettings): void
   dispose(): void
 }
 
@@ -70,13 +98,15 @@ const CHUNK_SAMPLES = 1600            // 100 ms, as pcm-recorder.js makes them
 const KEEP_SECONDS = 60               // utterances are at most 15 s; keep a generous margin
 const KEEP_CHUNKS = KEEP_SECONDS * SAMPLE_RATE / CHUNK_SAMPLES
 
-export function createLink({ onStatus = () => {}, onVerdict = () => {}, onRecording = () => {} }: LinkCallbacks = {}): Link {
+export function createLink({ onStatus = () => {}, onVerdict = () => {}, onRecording = () => {}, onText = () => {},
+                             onTranscription = () => {}, onTextError = () => {} }: LinkCallbacks = {}): Link {
   let ws: WebSocket | null = null
   let micCtx: AudioContext | null = null
   let micStream: MediaStream | null = null
   let held = false      // press() called, release() not yet
   let talking = false   // held, mic ready and the server told: audio is being sent
   let disposed = false
+  let settings: TranscriptionSettings | null = null  // sent on every (re)connect
   // The chunks sent on this connection, numbered like the server counts them (see server.py).
   let sentChunks = 0
   const kept = new Map<number, ArrayBuffer>()
@@ -120,15 +150,21 @@ export function createLink({ onStatus = () => {}, onVerdict = () => {}, onRecord
     socket.binaryType = 'arraybuffer'
     sentChunks = 0                   // the server counts from 1 again on every new connection
     kept.clear()
-    socket.onopen = () => onStatus('connected')
+    socket.onopen = () => {
+      onStatus('connected')
+      if (settings) send(JSON.stringify({ type: 'settings', ...settings }))
+    }
     socket.onmessage = (msg: MessageEvent<string>) => {
       // JSON.parse returns `any`: this is where we promise TypeScript what the server sends.
       const data = JSON.parse(msg.data) as ServerMessage
       if (data.type === 'verdict') onVerdict(data)          // here TypeScript knows: data is a Verdict
       else if (data.type === 'utterance' && data.event === 'ended') {  // ...and here an UtteranceEvent
         const pcm = assemble(data.first, data.last)
-        if (pcm) onRecording({ pcm, sampleRate: SAMPLE_RATE, seconds: data.seconds })
+        if (pcm) onRecording(data.first, { pcm, sampleRate: SAMPLE_RATE, seconds: data.seconds })
       }
+      else if (data.type === 'text') onText(data)
+      else if (data.type === 'transcription') onTranscription(data.available)
+      else if (data.type === 'text_error') onTextError(data.message)
     }
     socket.onclose = () => {
       ws = null
@@ -181,6 +217,11 @@ export function createLink({ onStatus = () => {}, onVerdict = () => {}, onRecord
     }
   }
 
+  function configure(next: TranscriptionSettings): void {
+    settings = next
+    send(JSON.stringify({ type: 'settings', ...next }))  // if not connected now: on connect
+  }
+
   function dispose(): void {
     release()
     disposed = true
@@ -190,5 +231,5 @@ export function createLink({ onStatus = () => {}, onVerdict = () => {}, onRecord
   }
 
   waitForServer()
-  return { press, release, dispose }
+  return { press, release, configure, dispose }
 }
