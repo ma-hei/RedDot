@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { ENGINES, LANGUAGES, MODES, engineAllowed, fixChoice, languageAllowed } from './settings.ts'
+import { ENGINES, LANGUAGES, MODES, alwaysOnAllowed, engineAllowed, fixChoice, languageAllowed } from './settings.ts'
 import type { Choice } from './settings.ts'
 
 export interface SettingsPanelProps {
@@ -32,12 +32,21 @@ export default function SettingsPanel({ choice, onChange, available, error }: Se
                     {m.label} <span className="hint">{m.hint}</span>
                   </label>
                 ))}
+                <label className={`checkbox${alwaysOnAllowed(choice.mode) ? '' : ' unavailable'}`}
+                       title={alwaysOnAllowed(choice.mode) ? '' : 'only with Per utterance or Live'}>
+                  <input type="checkbox" checked={choice.alwaysOn && alwaysOnAllowed(choice.mode)}
+                         disabled={!alwaysOnAllowed(choice.mode)} onChange={(e) => set({ alwaysOn: e.target.checked })} />
+                  Dot always on <span className="hint">
+                    {choice.mode === 'stream' ? 'listens without holding; click the dot for a new line'
+                      : 'record while holding'}
+                  </span>
+                </label>
               </fieldset>
               <fieldset disabled={choice.mode === 'off'}>
                 <legend>Service</legend>
                 {ENGINES.map((e) => (
                   <label key={e.id} className={engineAllowed(e, choice.mode) ? '' : 'unavailable'}
-                         title={engineAllowed(e, choice.mode) ? '' : "can't stream: only per recording"}>
+                         title={engineAllowed(e, choice.mode) ? '' : "can't stream: only per utterance or per press"}>
                     <input type="radio" name="engine" checked={choice.engine === e.id}
                            disabled={!engineAllowed(e, choice.mode)} onChange={() => set({ engine: e.id })} />
                     {e.label}
@@ -55,7 +64,6 @@ export default function SettingsPanel({ choice, onChange, available, error }: Se
                   </label>
                 ))}
               </fieldset>
-              <p className="note">Applies from the next press of the dot.</p>
             </>
           )}
           {error && <p className="error">{error}</p>}

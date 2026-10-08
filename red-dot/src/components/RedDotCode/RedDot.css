@@ -98,6 +98,7 @@
 .reddot-settings legend { padding: 0; margin-bottom: 4px; color: #a1a1aa; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
 .reddot-settings label { display: block; padding: 2px 0; cursor: pointer; }
 .reddot-settings label.unavailable { opacity: 0.4; cursor: default; }
+.reddot-settings label.checkbox { margin-top: 6px; padding-top: 6px; border-top: 1px solid #27272a; }
 .reddot-settings input { margin: 0 8px 0 0; accent-color: #ef4444; }
 .reddot-settings .hint { color: #71717a; font-size: 12px; }
 .reddot-settings .note { margin: 0; color: #a1a1aa; font-size: 12px; }

@@ -12,7 +12,7 @@ The goal of the project is a **testbed for AI agents that process voice recordin
 - **Live speech detection:** a backend judges every 100 ms of audio (loudness + WebRTC voice activity detection); the dot turns a more intense red, glows and moves faster while speech is heard.
 - **Utterances:** the audio is cut into utterances at pauses (0.7 s of quiet), when you let go, or after 15 s.
 - **Utterance lines:** each utterance becomes a wavy line next to the dot. Tap it to play it back, drag it to arrange your utterances.
-- **Speech-to-text (optional):** the text of each utterance appears under its line, with the service's confidence. **Live** (mode 1): while you speak, the text appears where the next line will be and is revised as you go; when the line appears, the text moves onto it and settles once you let go. **Per recording** (mode 2): each line gets its text when it ends. Service (Google long, Google chirp_2, Whisper) and language (German, English, detect) are chosen with the small settings button in the corner; it goes through [RecordingToText](recording-to-text/README.md).
+- **Speech-to-text (optional):** the text of each utterance appears under its line, with the service's confidence. **Per utterance** (mode 2): each pause ends a line, and its audio is sent right then; the text follows 1–2 s later. **Live** (mode 1): everything said during one press is one line; your words appear where that line will be and are revised as you go, and when you let go the line appears with the text settled under it. **Dot always on** (an option for these two): the dot listens all the time, no holding (but not while the tab is hidden); **click the dot** (or press `R`) to end the current line there, and listening goes on into the next one. With Per utterance, pauses still end lines by themselves. Dragging the dot just moves it. **Per press** (mode 3): like Live, the whole press is one line, but nothing is sent while you hold the dot; when you let go, the press goes as one recording (Google: up to 1 minute). Service (Google long, Google chirp_2, Whisper) and language (German, English, detect) are chosen with the small settings button in the corner; it goes through [RecordingToText](recording-to-text/README.md).
 - **Draggable dot:** pick up the dot while recording and move it around.
 - **Full-screen WebGL:** the dot and lines are drawn by a fragment shader, on desktop and mobile.
 - **Private by design:** recordings stay in the browser. The backend only judges the audio, and saves nothing unless debug recording is switched on.
@@ -41,7 +41,7 @@ flowchart LR
 
 1. **Recording:** while the dot is held, the AudioWorklet `pcm-recorder.js` turns the microphone into 16 kHz, 16-bit mono PCM and hands over 100 ms chunks. `link.ts` sends each chunk over a WebSocket, numbers it, and keeps the last 60 seconds of chunks in memory.
 2. **Speech detection:** for every chunk, the backend checks two things: is it loud enough (RMS), and does WebRTC's voice detector hear a voice in most of its 20 ms frames? It answers with a **verdict** (`speech: true/false`), which drives the dot's look.
-3. **Utterances:** a small state machine in the backend turns the verdicts into utterances: 200 ms of speech starts one (plus 300 ms of audio from just before, so the first syllable isn't cut), 700 ms of quiet, letting go or 15 seconds end it.
+3. **Utterances:** a small state machine in the backend turns the verdicts into utterances: 200 ms of speech starts one (plus 300 ms of audio from just before, so the first syllable isn't cut), 700 ms of quiet, letting go or 15 seconds end it. With speech-to-text Per press, pauses and the 15 seconds don't end it: one press is one utterance. With Live, the same, and with "Dot always on" the page listens all the time and a click on the dot ends the utterance (`{"type": "cut"}`); after 280 s the backend starts a new one itself, because a stream to Google may last at most 5 minutes.
 4. **Lines:** when an utterance ends, the backend only sends the **numbers of the chunks** it consists of. The browser assembles the audio from the chunks it kept and attaches it to a new line. The audio never has to travel back, and the server stores nothing.
 5. **Playback:** tapping a line plays its audio with the Web Audio API.
 
@@ -53,10 +53,11 @@ flowchart LR
 | page → server | binary, 3200 bytes | 100 ms of 16 kHz 16-bit mono PCM, only while pressed |
 | server → page | `{"type": "verdict", "speech": bool, "rms": int}` | one per chunk |
 | server → page | `{"type": "utterance", "event": "ended", "first": n, "last": m, "seconds": s}` | an utterance consists of the chunks numbered `first..last` (counted from 1 per connection) |
-| page → server | `{"type": "settings", "mode": "stream" \| "recording" \| "off", "service": ..., "model": ..., "language": ... \| null}` | speech-to-text settings; sent on connect and on every change, apply from the next press |
+| page → server | `{"type": "settings", "mode": "stream" \| "recording" \| "press" \| "off", "service": ..., "model": ..., "language": ... \| null}` | speech-to-text settings; sent on connect and on every change. A change while the dot listens ends the current line (finished with the old settings); the next line uses the new ones |
 | server → page | `{"type": "transcription", "available": bool}` | once on connect: whether the backend has RecordingToText |
 | server → page | `{"type": "text", "line": n \| null, "text": ..., "final": bool, "confidence": c \| null}` | the text for the line whose first chunk is `n`, or (`null`) for the line still being spoken; `final: false` while it can change |
 | server → page | `{"type": "text_error", "message": ...}` | a speech-to-text problem, shown in the settings |
+| page → server | `{"type": "cut"}` | "Dot always on": end the current line here and go on listening into a new one (a click on the dot) |
 
 `GET /healthz` answers `{"ok": true}`; the page polls it while the backend is unreachable before opening the WebSocket (Firefox slows down repeated failed WebSocket attempts).
 

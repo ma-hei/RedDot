@@ -7,6 +7,7 @@ export interface VoiceLink {
   status: LinkStatus
   press: () => Promise<boolean>
   release: () => void
+  cut: () => void
   configure: (settings: TranscriptionSettings) => void
 }
 
@@ -41,11 +42,12 @@ export function useVoiceLink(callbacks: Handlers = {}): VoiceLink {
   // Stable functions (same identity on every render), safe to use in other effects.
   const press = useCallback(() => linkRef.current?.press() ?? Promise.resolve(false), [])
   const release = useCallback(() => linkRef.current?.release(), [])
+  const cut = useCallback(() => linkRef.current?.cut(), [])
   const configure = useCallback((s: TranscriptionSettings) => {
     settingsRef.current = s
     linkRef.current?.configure(s)
   }, [])
 
-  return { status, press, release, configure }
+  return { status, press, release, cut, configure }
 }
 

@@ -3,6 +3,7 @@
 //   const link = createLink({ onStatus, onVerdict, onRecording, onText, onTranscription, onTextError })
 //   await link.press()   // start listening (opens the mic on first use); false if it couldn't
 //   link.release()       // stop listening; the server ends the utterance
+//   link.cut()           // while listening: end the current line here and go on with a new one
 //   link.configure(s)    // speech-to-text settings (kept and sent again after a reconnect)
 //   link.dispose()       // close everything (a React component unmounting)
 //
@@ -42,7 +43,7 @@ export interface TextMessage {
 
 /** How the server should transcribe (see transcriber.py and settings.ts). */
 export interface TranscriptionSettings {
-  mode: 'stream' | 'recording' | 'off'
+  mode: 'stream' | 'recording' | 'press' | 'off'
   service: string
   model: string | null
   language: string | null      // null: the service detects it
@@ -75,6 +76,7 @@ export interface LinkCallbacks {
 export interface Link {
   press(): Promise<boolean>
   release(): void
+  cut(): void
   configure(settings: TranscriptionSettings): void
   dispose(): void
 }
@@ -95,7 +97,7 @@ function wsUrl(path: string): string {
 
 const SAMPLE_RATE = 16000
 const CHUNK_SAMPLES = 1600            // 100 ms, as pcm-recorder.js makes them
-const KEEP_SECONDS = 60               // utterances are at most 15 s; keep a generous margin
+const KEEP_SECONDS = 300              // an utterance is at most 15 s, or a whole press (speech-to-text live or per press, < 5 min)
 const KEEP_CHUNKS = KEEP_SECONDS * SAMPLE_RATE / CHUNK_SAMPLES
 
 export function createLink({ onStatus = () => {}, onVerdict = () => {}, onRecording = () => {}, onText = () => {},
@@ -180,6 +182,17 @@ export function createLink({ onStatus = () => {}, onVerdict = () => {}, onRecord
     const ctx = new AudioContext({ sampleRate: 16000 })  // the browser resamples the mic to 16 kHz
     micStream = stream
     micCtx = ctx
+    // Started without a click or key (live speech-to-text listens from the start), browsers keep
+    // audio paused until the page is first used: resume it then.
+    if (ctx.state === 'suspended') {
+      const resume = () => {
+        void ctx.resume()
+        document.removeEventListener('pointerdown', resume)
+        document.removeEventListener('keydown', resume)
+      }
+      document.addEventListener('pointerdown', resume)
+      document.addEventListener('keydown', resume)
+    }
     await ctx.audioWorklet.addModule(`/pcm-recorder.js?v=${Date.now()}`)
     const node = new AudioWorkletNode(ctx, 'pcm-recorder')
     // 100 ms chunks of 16-bit PCM, only sent while pressed; numbered and kept for recordings
@@ -217,6 +230,10 @@ export function createLink({ onStatus = () => {}, onVerdict = () => {}, onRecord
     }
   }
 
+  function cut(): void {
+    if (talking) send(JSON.stringify({ type: 'cut' }))
+  }
+
   function configure(next: TranscriptionSettings): void {
     settings = next
     send(JSON.stringify({ type: 'settings', ...next }))  // if not connected now: on connect
@@ -231,5 +248,5 @@ export function createLink({ onStatus = () => {}, onVerdict = () => {}, onRecord
   }
 
   waitForServer()
-  return { press, release, configure, dispose }
+  return { press, release, cut, configure, dispose }
 }

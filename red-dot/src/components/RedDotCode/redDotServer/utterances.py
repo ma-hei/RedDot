@@ -13,6 +13,10 @@ server passes in step 1's verdict (speech_check.py) with every chunk.
                         fewer than MIN_SPEECH_CHUNKS of speech
 
 Letting go of the dot (or R) also ends an utterance: see finish().
+
+With split_at_pauses off (speech-to-text live or per press, see server.py), pauses don't end an utterance:
+everything said during one press is one utterance, which ends when the dot is let go (or after
+PRESS_MAX_SECONDS).
 """
 
 from __future__ import annotations
@@ -27,6 +31,8 @@ END_CHUNKS = 7          # 700 ms of quiet ends it
 PRE_ROLL_CHUNKS = 3     # keep 300 ms from before the start, so the first syllable isn't cut
 MIN_SPEECH_CHUNKS = 3   # shorter than 300 ms of speech: a click or a cough
 MAX_SECONDS = 15
+PRESS_MAX_SECONDS = 280  # one utterance per press: RecordingToText ends a stream before 5 minutes
+                         # (server.py also starts a new line and stream after this long)
 
 
 @dataclass
@@ -39,6 +45,7 @@ class UtteranceEvent:
 
 class UtteranceRecorder:
     def __init__(self) -> None:
+        self.split_at_pauses = True  # False: one utterance per press (set it before the press)
         self._recording = False
         self._pre: deque[bytes] = deque(maxlen=PRE_ROLL_CHUNKS)
         self._chunks: list[bytes] = []
@@ -68,7 +75,9 @@ class UtteranceRecorder:
             self._quiet_run = 0
         else:
             self._quiet_run += 1
-        if self._quiet_run >= END_CHUNKS or self._seconds() >= MAX_SECONDS:
+        if self.split_at_pauses and (self._quiet_run >= END_CHUNKS or self._seconds() >= MAX_SECONDS):
+            return self._end()
+        if not self.split_at_pauses and self._seconds() >= PRESS_MAX_SECONDS:
             return self._end()
         return None
 

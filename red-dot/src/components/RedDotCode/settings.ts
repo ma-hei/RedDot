@@ -10,13 +10,14 @@ export interface Engine {
   label: string
   service: string
   model: string | null
-  streams: boolean           // can be used live (mode 1); otherwise only per recording (mode 2)
+  streams: boolean           // can be used live (mode 1); otherwise only with whole recordings (modes 2 and 3)
   detectsLanguage: boolean   // works without a language
 }
 
 export const MODES: { id: Mode; label: string; hint: string }[] = [
-  { id: 'stream', label: 'Live', hint: 'text while you speak (mode 1)' },
-  { id: 'recording', label: 'Per recording', hint: 'text after each utterance (mode 2)' },
+  { id: 'recording', label: 'Per utterance', hint: 'transcribe on speech pause' },
+  { id: 'stream', label: 'Live', hint: 'transcribe immediately' },
+  { id: 'press', label: 'Per press', hint: 'transcribe when letting go of dot' },
   { id: 'off', label: 'Off', hint: 'no speech-to-text' },
 ]
 
@@ -37,9 +38,17 @@ export interface Choice {
   mode: Mode
   engine: string
   language: string
+  // The dot listens all the time, without holding (only Live and Per utterance, see
+  // alwaysOnAllowed). A click on the dot then ends the current line.
+  alwaysOn: boolean
 }
 
-export const DEFAULT_CHOICE: Choice = { mode: 'stream', engine: 'google-long', language: 'de-DE' }
+export const DEFAULT_CHOICE: Choice = { mode: 'stream', engine: 'google-long', language: 'de-DE', alwaysOn: false }
+
+/** "Dot always on" makes sense where lines don't depend on holding: Live and Per utterance. */
+export function alwaysOnAllowed(mode: Mode): boolean {
+  return mode === 'stream' || mode === 'recording'
+}
 
 const engineOf = (choice: Choice): Engine => ENGINES.find((e) => e.id === choice.engine) ?? ENGINES[0]
 
@@ -61,6 +70,7 @@ export function fixChoice(choice: Choice): Choice {
   if (!LANGUAGES.some((l) => l.id === fixed.language) || !languageAllowed(fixed.language, fixed)) {
     fixed.language = DEFAULT_CHOICE.language
   }
+  fixed.alwaysOn = fixed.alwaysOn === true  // kept when switching to a mode without it, but not used there
   return fixed
 }
 

@@ -7,8 +7,13 @@ Only active when RECORDING_TO_TEXT_URL is set, e.g. http://localhost:8092. The p
                       speak and is replaced as the service revises it; it's tied to the lines by
                       the time of each word. Needs a service that can stream (Google).
     mode "recording"  mode 2: each finished utterance (= line) is sent as a whole recording when
-                      it ends; its text comes back once. Any service (also Whisper).
+                      it ends, i.e. at each pause; its text comes back once. Any service (also Whisper).
+    mode "press"      mode 3: the whole press is one line and one recording, sent when the dot is
+                      let go; its text comes back once. Any service. Google takes at most 1 minute
+                      this way (its limit for a single recording).
     mode "off"        nothing is sent.
+
+In modes 1 and 3 one press is one line: server.py tells the utterance cutter not to split at pauses.
 
 To the page (see link.ts):
     {"type": "transcription", "available": bool}        once, when the page connects
@@ -60,14 +65,14 @@ Emit = Callable[[dict], Awaitable[None]]
 
 @dataclass
 class Settings:
-    mode: str = "stream"            # "stream", "recording" or "off"
+    mode: str = "stream"            # "stream", "recording", "press" or "off"
     service: str = "google"
     model: str | None = "long"
     language: str | None = "de-DE"  # None: the service detects it
 
     @classmethod
     def from_page(cls, data: dict) -> Settings:
-        mode = data.get("mode") if data.get("mode") in ("stream", "recording", "off") else "off"
+        mode = data.get("mode") if data.get("mode") in ("stream", "recording", "press", "off") else "off"
         return cls(mode=mode, service=str(data.get("service") or "google"),
                    model=data.get("model") or None, language=data.get("language") or None)
 
@@ -108,9 +113,18 @@ class Transcriber:
         return bool(BASE_URL)
 
     def configure(self, data: dict) -> None:
-        """New settings from the page; they apply from the next press."""
+        """New settings from the page. While listening, server.py first ends the current line (with
+        the old settings) and then starts a new one with these."""
         self.settings = Settings.from_page(data)
         log.info(">>> settings: %s", self.settings)
+
+    def would_change(self, data: dict) -> bool:
+        return Settings.from_page(data) != self.settings
+
+    def splits_at_pauses(self) -> bool:
+        """Whether pauses end a line: not in Live and Per press, where a line is a whole press
+        (or, with the dot always on, lasts until a click)."""
+        return self.settings.mode not in ("stream", "press") or not BASE_URL
 
     # ---------------- the dot ----------------
     async def start(self, chunks_so_far: int) -> None:
@@ -152,7 +166,7 @@ class Transcriber:
         """An utterance ended and the page now has a line for chunks first..last."""
         if not BASE_URL:
             return
-        if self.settings.mode == "recording":
+        if self.settings.mode in ("recording", "press"):  # the press's one utterance ends on release
             asyncio.create_task(self._transcribe_recording(first, audio, self.settings))
         elif self._current:  # mode 1: from now on, text for this stretch goes to the line
             p = self._current
@@ -163,7 +177,7 @@ class Transcriber:
         """The page went away."""
         await self._drop()
 
-    # ---------------- mode 2: one recording per line ----------------
+    # ---------------- modes 2 and 3: one recording per line ----------------
     async def _transcribe_recording(self, first: int, audio: bytes, s: Settings) -> None:
         await self._emit({"type": "text", "line": first, "text": "", "final": False, "confidence": None})
         query = {"service": s.service, "language": s.language or "none"}

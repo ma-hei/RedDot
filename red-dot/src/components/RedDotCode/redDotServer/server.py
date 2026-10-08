@@ -19,7 +19,11 @@ WebSocket /ws:
     page -> server  text   {"type": "mic", "on": true|false}   dot/R pressed or released
                     binary 100 ms of 16 kHz 16-bit mono PCM   only while pressed
                     text   {"type": "settings", "mode": ..., "service": ..., "model": ..., "language": ...}
-                           how to transcribe (see transcriber.py); applies from the next press
+                           how to transcribe (see transcriber.py); while listening, a change ends the
+                           current line and the next one uses the new settings
+                    text   {"type": "cut"}   while listening: end the current line here and go on
+                           with a new one (live speech-to-text, where the page listens all the time
+                           and a click on the dot starts a new line)
     server -> page  text   {"type": "verdict", "speech": bool, "rms": int}   one per chunk
                     text   {"type": "utterance", "event": "ended", "first": n, "last": m, "seconds": s}
                            an utterance is complete: it consists of the chunks numbered first..last
@@ -44,7 +48,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from speech_check import MIN_RMS, SAMPLE_RATE, ChunkCheck, SpeechCheck
 from transcriber import Transcriber
-from utterances import UtteranceEvent, UtteranceRecorder
+from utterances import PRESS_MAX_SECONDS, UtteranceEvent, UtteranceRecorder
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s.%(msecs)03d  %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger("orb-server")
@@ -116,8 +120,9 @@ async def ws_endpoint(websocket: WebSocket) -> None:
     await send({"type": "transcription", "available": Transcriber.available()})
     speech_check = SpeechCheck()
     recorder = UtteranceRecorder()
-    talking = False  # the dot (or R) is held
+    talking = False  # the dot (or R) is held, or the page listens all the time (live speech-to-text)
     chunks = 0       # chunks received while talking; the page counts the ones it sends the same way
+    press_start = 0  # chunks received before the current press (or since the last cut)
 
     async def utterance_done(ev: UtteranceEvent, why: str = "") -> None:
         report(ev, why)
@@ -128,6 +133,19 @@ async def ws_endpoint(websocket: WebSocket) -> None:
                         "seconds": round(ev.seconds, 1)})
             await transcriber.utterance(first, chunks, ev.audio)
 
+    async def cut(why: str, settings: dict | None = None) -> None:
+        """End the current line here and go on listening into a new one (and a new stream). With
+        new settings: the current line is finished with the old ones, the new line uses these."""
+        nonlocal press_start
+        if ev := recorder.finish():
+            await utterance_done(ev, why)
+        await transcriber.stop()
+        if settings is not None:
+            transcriber.configure(settings)
+            recorder.split_at_pauses = transcriber.splits_at_pauses()
+        await transcriber.start(chunks)
+        press_start = chunks
+
     try:
         while True:
             msg = await websocket.receive()
@@ -136,9 +154,17 @@ async def ws_endpoint(websocket: WebSocket) -> None:
             if msg.get("text"):
                 data = json.loads(msg["text"])
                 if data.get("type") == "settings":
-                    transcriber.configure(data)
+                    if talking and transcriber.would_change(data):
+                        await cut(" because the settings changed", data)
+                    else:
+                        transcriber.configure(data)
+                elif data.get("type") == "cut" and talking:
+                    await cut(" because the dot was clicked")
                 elif data.get("type") == "mic" and bool(data.get("on")) != talking:
                     talking = bool(data.get("on"))
+                    press_start = chunks
+                    if talking:  # live and per-press speech-to-text: everything said during this press is one line
+                        recorder.split_at_pauses = transcriber.splits_at_pauses()
                     if not talking and (ev := recorder.finish()):
                         await utterance_done(ev, " because the dot/R was released")
                     log.info("=== %s ===", "talking" if talking else "not talking")
@@ -152,6 +178,9 @@ async def ws_endpoint(websocket: WebSocket) -> None:
                 await send({"type": "verdict", "speech": c.is_speech, "rms": round(c.rms)})
                 if ev:
                     await utterance_done(ev)
+                # Listening without pauses for a new line: a stream may last at most 5 minutes.
+                if not recorder.split_at_pauses and (chunks - press_start) * 0.1 >= PRESS_MAX_SECONDS:
+                    await cut(f" after {PRESS_MAX_SECONDS} s (the longest a stream may last)")
     except WebSocketDisconnect:
         pass
     finally:

@@ -5,7 +5,7 @@ import { LOOKS, advance, createOrbState } from './looks.ts'
 import type { Look, LookName, OrbState } from './looks.ts'
 import type { LinkStatus } from './link.ts'
 import SettingsPanel from './SettingsPanel.tsx'
-import { loadChoice, saveChoice, toSettings } from './settings.ts'
+import { alwaysOnAllowed, loadChoice, saveChoice, toSettings } from './settings.ts'
 import type { Choice } from './settings.ts'
 import { createOrbRenderer as createSdfRenderer } from './renderer.ts'
 import { createOrbRenderer as createMeshRenderer } from './rendererMesh.ts'
@@ -43,13 +43,14 @@ export default function RedDot({ onStatusChange }: RedDotProps) {
   	const [choice, setChoice] = useState<Choice>(loadChoice)
   	const choiceRef = useRef(choice)       // for the animation loop, which runs outside React
   	const [available, setAvailable] = useState<boolean | null>(null)
+  	const availableRef = useRef(available)  // for the animation loop, like choiceRef
   	const [textError, setTextError] = useState<string | null>(null)
   	const pending = useRef<LineText | null>(null)
   	// Text for a line that doesn't exist yet (in case it arrives first), by the line's key.
   	const early = useRef(new Map<number, LineText>())
 
   	// ---- the server connection ----
-  	const { status, press, release, configure } = useVoiceLink({
+  	const { status, press, release, cut, configure } = useVoiceLink({
     		onVerdict: (v) => {
       			if (v.speech) orb.current.lastSpeechAt = performance.now()
       			orb.current.level = Math.min(1, v.rms / 3000)
@@ -77,11 +78,20 @@ export default function RedDot({ onStatusChange }: RedDotProps) {
       			if (line) line.text = value
       			else early.current.set(key, value)
     		},
-    		onTranscription: setAvailable,
+    		onTranscription: (yes) => {
+      			availableRef.current = yes
+      			setAvailable(yes)
+    		},
     		onTextError: setTextError,
   	})
 
+  	// "Dot always on" (Live and Per utterance): the dot listens all the time ("hands-free"), no
+  	// holding; a click on the dot (or R) ends the current line. Otherwise: hold the dot (or R) to talk.
+  	const handsFree = choice.alwaysOn && alwaysOnAllowed(choice.mode) && available === true
+  	const handsFreeRef = useRef(handsFree)  // for the event handlers below
+
   	const stopTalking = useCallback(() => {
+    		if (handsFreeRef.current) return    // listening doesn't stop by letting go
     		if (drag.current?.kind === 'dot') drag.current = null  // letting go also puts the dot down
     		const s = orb.current
     		if (!s.pressed) return
@@ -92,7 +102,7 @@ export default function RedDot({ onStatusChange }: RedDotProps) {
 	// ---- talking: pressing the dot or R ----
 	const startTalking = useCallback(() => {
 		const s = orb.current
-    		if (s.pressed) return
+    		if (s.pressed || handsFreeRef.current) return
     		s.pressed = true                  // change the look right away, even while the mic starts
     		pending.current = null            // a new press: no text yet
     		press().then((ok) => { if (!ok) s.pressed = false })
@@ -107,7 +117,8 @@ export default function RedDot({ onStatusChange }: RedDotProps) {
   	// it was picked up (pointer minus its centre, in CSS pixels), so it moves without jumping.
   	// For a line, also when and where it was pressed, to tell a tap (play) from a drag.
   	const drag = useRef<
-    		| { kind: 'dot'; pointerId: number; grabX: number; grabY: number }
+    		| { kind: 'dot'; pointerId: number; grabX: number; grabY: number
+        		downAt: number; downX: number; downY: number; moved: boolean }
     		| { kind: 'line'; line: UtteranceLine; pointerId: number; grabX: number; grabY: number
         		downAt: number; downX: number; downY: number; moved: boolean }
     		| null
@@ -129,6 +140,34 @@ export default function RedDot({ onStatusChange }: RedDotProps) {
     		setTextError(null)   // a problem with the old settings doesn't apply to the new ones
   	}, [])
 
+  	// Hands-free: listen whenever the page is connected and visible. A hidden tab doesn't listen
+  	// (privacy, and Google bills every streamed second, silence included).
+  	useEffect(() => {
+    		handsFreeRef.current = handsFree
+    		const s = orb.current
+    		const stop = () => {
+      			if (!s.pressed) return
+      			s.pressed = false
+      			release()
+    		}
+    		if (!handsFree) {
+      			stop()                       // e.g. switched to another mode: back to holding
+      			return
+    		}
+    		const update = () => {
+      			if (document.hidden || status !== 'connected') {
+        				stop()                     // after a reconnect, update() starts listening again
+      			} else if (!s.pressed) {
+        				s.pressed = true
+        				pending.current = null
+        				press().then((ok) => { if (!ok) s.pressed = false })
+      			}
+    		}
+    		update()
+    		document.addEventListener('visibilitychange', update)
+    		return () => document.removeEventListener('visibilitychange', update)
+  	}, [handsFree, status, press, release])
+
   	// ---- the animation loop: starts when the canvas appears, stops when it goes away ----
   	useEffect(() => {
     		const canvas = canvasRef.current
@@ -144,12 +183,12 @@ export default function RedDot({ onStatusChange }: RedDotProps) {
       			advance(orb.current, dt, now)
       			advanceLines(lines.current, dt)
       			renderer.draw(orb.current.look, orb.current.phase, orb.current.center, lines.current)
-      			// The text of the line being spoken, where that line will appear (live mode only):
-      			// "…" while the dot is held, then the service's guesses until the line exists.
+      			// The text of the line being spoken, where that line will appear: "…" while the dot is
+      			// held, and in live mode the service's guesses until the line exists.
       			const size = { width: canvas.clientWidth, height: canvas.clientHeight }
-      			const live = choiceRef.current.mode === 'stream'
+      			const on = choiceRef.current.mode !== 'off' && availableRef.current === true
       			const text = pending.current?.text ? pending.current : orb.current.pressed ? { text: '', final: false, confidence: null } : null
-      			labels.sync(lines.current, live && text ? {
+      			labels.sync(lines.current, on && text ? {
         				text, at: placeNewLine(lines.current, orb.current.center, LOOKS.pressed.radius, size),
       			} : null, size)
       			frameId = requestAnimationFrame(frame)
@@ -167,7 +206,11 @@ export default function RedDot({ onStatusChange }: RedDotProps) {
     		// Not while typing or choosing in the settings panel.
     		const inForm = (e: KeyboardEvent) => e.target instanceof HTMLElement && e.target.closest('input, select, textarea, button') !== null
     		const isTalkKey = (e: KeyboardEvent) => e.key.toLowerCase() === 'r' && !e.ctrlKey && !e.metaKey && !e.altKey && !inForm(e)
-    		const onKeyDown = (e: KeyboardEvent) => { if (isTalkKey(e) && !e.repeat) startTalking() }
+    		const onKeyDown = (e: KeyboardEvent) => {
+      			if (!isTalkKey(e) || e.repeat) return
+      			if (handsFreeRef.current) cut()   // hands-free: R ends the current line, like a click on the dot
+      			else startTalking()
+    		}
     		const onKeyUp = (e: KeyboardEvent) => { if (e.key.toLowerCase() === 'r') stopTalking() }
     		document.addEventListener('keydown', onKeyDown)
     		document.addEventListener('keyup', onKeyUp)
@@ -177,7 +220,7 @@ export default function RedDot({ onStatusChange }: RedDotProps) {
       			document.removeEventListener('keyup', onKeyUp)
       			window.removeEventListener('blur', stopTalking)
     		}
-  	}, [startTalking, stopTalking])
+  	}, [startTalking, stopTalking, cut])
 
   	// The pointer on the canvas, in CSS pixels, and the canvas size.
   	const pointer = (e: PointerEvent<HTMLCanvasElement>): [x: number, y: number, size: Size] => {
@@ -204,6 +247,7 @@ export default function RedDot({ onStatusChange }: RedDotProps) {
     		const d = drag.current
     		if (d?.kind !== 'dot' || d.pointerId !== e.pointerId) return
     		const rect = e.currentTarget.getBoundingClientRect()
+    		if (Math.hypot(e.clientX - rect.left - d.downX, e.clientY - rect.top - d.downY) > TAP_MOVE_PX) d.moved = true
     		const { radius, wobble } = orb.current.look
     		const r = radius * (1 + wobble) * Math.min(rect.width, rect.height)  // the dot's outermost edge
     		const clamp = (v: number, lo: number, hi: number) => Math.min(Math.max(v, lo), hi)
@@ -237,6 +281,10 @@ export default function RedDot({ onStatusChange }: RedDotProps) {
       			drag.current = null
       			const tap = !d.moved && performance.now() - d.downAt < TAP_MS
       			if (tap && e.type === 'pointerup') playLine(d.line)  // a tap: play its utterance
+    		} else if (d?.kind === 'dot' && handsFreeRef.current) {
+      			drag.current = null
+      			const tap = !d.moved && performance.now() - d.downAt < TAP_MS
+      			if (tap && e.type === 'pointerup') cut()  // hands-free: a click on the dot ends the current line
     		} else {
       			stopTalking()                    // the dot: stop recording, which also ends its drag
     		}
@@ -266,9 +314,12 @@ export default function RedDot({ onStatusChange }: RedDotProps) {
         			if (!isOnDot(e)) return
         			e.currentTarget.setPointerCapture(e.pointerId)  // keep getting moves and pointerup even off the dot
         			const [grabX, grabY] = fromDot(e)
-        			drag.current = { kind: 'dot', pointerId: e.pointerId, grabX, grabY }  // lift the dot...
+        			drag.current = {                                // lift the dot...
+          				kind: 'dot', pointerId: e.pointerId, grabX, grabY,
+          				downAt: performance.now(), downX: x, downY: y, moved: false,
+        			}
         			e.currentTarget.style.cursor = 'grabbing'
-        			startTalking()                                  // ...and start recording
+        			startTalking()                                  // ...and start recording (not hands-free: it listens already)
       			}}
       			onPointerUp={letGo}
       			onPointerCancel={letGo}
