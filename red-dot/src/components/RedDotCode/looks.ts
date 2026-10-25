@@ -38,18 +38,27 @@ export const LOOKS: Record<LookName, Look> = {
 // The three things the dot reacts to; each is blended in gradually (see `amount`).
 type Blend = 'online' | 'pressed' | 'speech'
 
-// ---------------- the utterance lines: design them here ----------------
-// After every utterance a short wavy line appears; it stays in place and its wave moves.
+// ---------------- the speech bubbles: design them here ----------------
+// One bubble per press of the dot: it pops up when the first utterance starts and grows with the
+// seconds of speech it holds, up to its full size. An outlined oval with a tail that points at the
+// dot while the press goes on, and keeps that direction afterwards.
 // Sizes are shares of the shorter screen side, like the dot's radius.
-export const LINE = {
-  halfLength: BASE_LOOKS.idle.radius, // half the line's length: the whole line is as long as the dot is wide
-  amplitude: 0.022,                   // wave height while resting
-  thickness: 0.006,                   // half the stroke width
-  waves: 2,                           // wave periods along the line
-  speed: 3,                           // how fast the wave moves (radians per second)
-  color: [0.95, 0.72, 0.70] as RGB,   // a pale red
-  // While the utterance plays, the wave is higher (x 2) and faster, and the line turns white.
-  playing: { amplitude: 2, speed: 3 },
+export const BUBBLE = {
+  minRadius: 0.04,                    // half its height when it pops up
+  maxRadius: 0.15,                    // half its height at full size
+  fullSeconds: 20,                    // this much speech makes it full size (it grows fastest at first)
+  aspect: 1.35,                       // width / height
+  outline: 0.005,                     // the outline's thickness
+  tail: 0.4,                          // how far the tail reaches beyond the oval (share of its half height)
+  tailWidth: 0.7,                     // the tail's width where it leaves the oval (share of its half height)
+  tilt: 0.45,                         // a new bubble goes above the dot, this far off straight up (radians, ≈ 25°)
+  popSeconds: 0.35,                   // popping up: from nothing to its size, overshooting a little
+  breathe: 0.035,                     // while its press goes on, its size swings by this share...
+  breatheSpeed: 3,                    // ...this fast (radians per second)
+  color: [0.95, 0.72, 0.70] as RGB,   // the outline: a pale red
+  fill: [0.16, 0.06, 0.07] as RGB,    // inside: a dark red, so the dot and text stand out
+  // While its utterances play, the outline turns white and the inside lighter.
+  playingFill: [0.36, 0.12, 0.13] as RGB,
 }
 
 // How quickly the dot glides to a new look (per second; higher = snappier).

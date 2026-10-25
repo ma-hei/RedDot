@@ -1,6 +1,6 @@
 // The connection to the lab server: WebSocket, microphone, push-to-talk. No React.
 //
-//   const link = createLink({ onStatus, onVerdict, onRecording, onText, onTranscription, onTextError })
+//   const link = createLink({ onStatus, onVerdict, onUtterance, onText, onTranscription, onTextError })
 //   await link.press()   // start listening (opens the mic on first use); false if it couldn't
 //   link.release()       // stop listening; the server ends the utterance
 //   link.cut()           // while listening: end the current line here and go on with a new one
@@ -9,7 +9,7 @@
 //
 // ---------------- the protocol (see server.py) ----------------
 // Page -> server: {"type": "mic", "on": bool} and 100 ms PCM chunks (binary) while pressed.
-// Server -> page: one verdict per chunk, and an "ended" message per finished utterance.
+// Server -> page: one verdict per chunk, and "started" / "ended" (or "discarded") per utterance.
 // Speech-to-text (see transcriber.py): page -> server {"type": "settings", ...}; server -> page
 // "transcription" (available or not), "text" (for a line, or for the one still being spoken),
 // "text_error".
@@ -24,13 +24,18 @@ export interface Verdict {
   rms: number                        // loudness of the chunk (16-bit scale)
 }
 
-export interface UtteranceEvent {
-  type: 'utterance'
-  event: 'ended'
-  first: number                      // the utterance is the chunks numbered first..last
-  last: number
-  seconds: number
-}
+// What the server says about an utterance (see server.py): it started, ended, or had too little speech.
+type UtteranceMessage =
+  | { type: 'utterance'; event: 'started'; first: number; seconds: number }
+  | { type: 'utterance'; event: 'ended'; first: number; last: number; seconds: number }
+  | { type: 'utterance'; event: 'discarded'; first: number }
+
+/** An utterance, named by its key: its first chunk. "ended" carries its audio (null if the page
+ *  doesn't have all of its chunks any more). */
+export type UtteranceEvent =
+  | { event: 'started'; key: number; seconds: number }
+  | { event: 'ended'; key: number; seconds: number; recording: Recording | null }
+  | { event: 'discarded'; key: number }
 
 /** Speech-to-text for one line (by its key: the first chunk), or for the line still being spoken (null). */
 export interface TextMessage {
@@ -58,7 +63,7 @@ export interface Recording {
 
 // A "discriminated union": the `type` field tells TypeScript which of the two it is.
 type ServerMessage =
-  | Verdict | UtteranceEvent | TextMessage
+  | Verdict | UtteranceMessage | TextMessage
   | { type: 'transcription'; available: boolean }
   | { type: 'text_error'; message: string }
 
@@ -67,7 +72,7 @@ export type LinkStatus = 'connecting' | 'connected' | 'disconnected' | `micropho
 export interface LinkCallbacks {
   onStatus?: (status: LinkStatus) => void
   onVerdict?: (verdict: Verdict) => void
-  onRecording?: (key: number, recording: Recording) => void  // key: the utterance's first chunk
+  onUtterance?: (event: UtteranceEvent) => void
   onText?: (text: TextMessage) => void
   onTranscription?: (available: boolean) => void
   onTextError?: (message: string) => void
@@ -100,7 +105,7 @@ const CHUNK_SAMPLES = 1600            // 100 ms, as pcm-recorder.js makes them
 const KEEP_SECONDS = 300              // an utterance is at most 15 s, or a whole press (speech-to-text live or per press, < 5 min)
 const KEEP_CHUNKS = KEEP_SECONDS * SAMPLE_RATE / CHUNK_SAMPLES
 
-export function createLink({ onStatus = () => {}, onVerdict = () => {}, onRecording = () => {}, onText = () => {},
+export function createLink({ onStatus = () => {}, onVerdict = () => {}, onUtterance = () => {}, onText = () => {},
                              onTranscription = () => {}, onTextError = () => {} }: LinkCallbacks = {}): Link {
   let ws: WebSocket | null = null
   let micCtx: AudioContext | null = null
@@ -160,9 +165,13 @@ export function createLink({ onStatus = () => {}, onVerdict = () => {}, onRecord
       // JSON.parse returns `any`: this is where we promise TypeScript what the server sends.
       const data = JSON.parse(msg.data) as ServerMessage
       if (data.type === 'verdict') onVerdict(data)          // here TypeScript knows: data is a Verdict
-      else if (data.type === 'utterance' && data.event === 'ended') {  // ...and here an UtteranceEvent
-        const pcm = assemble(data.first, data.last)
-        if (pcm) onRecording(data.first, { pcm, sampleRate: SAMPLE_RATE, seconds: data.seconds })
+      else if (data.type === 'utterance') {                  // ...and here an UtteranceMessage
+        if (data.event === 'ended') {
+          const pcm = assemble(data.first, data.last)
+          const recording = pcm && { pcm, sampleRate: SAMPLE_RATE, seconds: data.seconds }
+          onUtterance({ event: 'ended', key: data.first, seconds: data.seconds, recording })
+        } else if (data.event === 'started') onUtterance({ event: 'started', key: data.first, seconds: data.seconds })
+        else if (data.event === 'discarded') onUtterance({ event: 'discarded', key: data.first })
       }
       else if (data.type === 'text') onText(data)
       else if (data.type === 'transcription') onTranscription(data.available)

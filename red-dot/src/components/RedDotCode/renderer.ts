@@ -1,17 +1,18 @@
 // Draws the dot with WebGL2. No React: give it a canvas, call draw() every frame.
 //
 //   const renderer = createOrbRenderer(canvas)
-//   renderer.draw(look, phase, center, lines)   // the dot from looks.ts, the lines from utteranceLines.ts
+//   renderer.draw(look, phase, center, bubbles)  // the dot from looks.ts, the bubbles' shapes from speechBubbles.ts
 //   renderer.dispose()           // when the canvas goes away
 
-import { LINE } from './looks.ts'
+import { BUBBLE } from './looks.ts'
 import type { Look } from './looks.ts'
-import { MAX_LINES } from './utteranceLines.ts'
-import type { UtteranceLine } from './utteranceLines.ts'
+import { MAX_BUBBLES } from './speechBubbles.ts'
+import type { BubbleShape } from './speechBubbles.ts'
 
 export interface OrbRenderer {
-  /** center: where the dot is, as a share of the canvas ([0.5, 0.5] = middle, y from the top) */
-  draw(look: Look, phase: number, center: [x: number, y: number], lines: readonly UtteranceLine[]): void
+  /** center: where the dot is, as a share of the canvas ([0.5, 0.5] = middle, y from the top);
+   *  bubbles: in CSS pixels (bubbleShape), drawn in this order (the last on top) */
+  draw(look: Look, phase: number, center: [x: number, y: number], bubbles: readonly BubbleShape[]): void
   dispose(): void
 }
 
@@ -22,37 +23,55 @@ void main() {
   gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
 }`
 
-// The dot and the utterance lines, computed for every pixel: d < 0 is inside a shape.
+// The dot and the speech bubbles, computed for every pixel: d < 0 is inside a shape.
 const FRAGMENT = `#version 300 es
 precision highp float;
-#define MAX_LINES ${MAX_LINES}
+#define MAX_BUBBLES ${MAX_BUBBLES}
 uniform vec2 u_res;       // canvas size in pixels
 uniform vec2 u_center;    // where the dot is, in pixels (WebGL counts y from the bottom)
 uniform float u_radius, u_wobble, u_lobes, u_phase, u_squash, u_glow;
 uniform vec3 u_color;
-// The utterance lines (see LINE in looks.ts)
-uniform int u_lineCount;
-uniform vec4 u_lines[MAX_LINES];  // per line: xy = centre in pixels (y from the bottom), z = wave phase, w = glow 0..1
-uniform vec4 u_lineShape;         // half length, wave height, half thickness, waves (lengths: shares of the shorter side)
-uniform float u_linePlayAmp;      // wave height factor while playing
-uniform vec3 u_lineColor;
+// The speech bubbles (see BUBBLE in looks.ts), in pixels with y from the bottom; three per bubble:
+// (centre, half width, half height), (tail corner a, tail corner b), (tail tip, glow 0..1, outline)
+uniform int u_bubbleCount;
+uniform vec4 u_bubbles[MAX_BUBBLES * 3];
+uniform vec3 u_bubbleColor, u_bubbleFill, u_bubblePlayingFill;
 out vec4 outColor;
 
-// Draw every line over col: a stroke along y = height * taper * sin(...), tapered to 0 at
-// both ends like a vibrating string. "hl" because "half" is a reserved word in GLSL.
-vec3 drawLines(vec3 col, float unit) {
-  for (int i = 0; i < MAX_LINES; i++) {
-    if (i >= u_lineCount) break;
-    vec4 L = u_lines[i];
-    vec2 q = (gl_FragCoord.xy - L.xy) / unit;           // this pixel, relative to the line's centre
-    float hl = u_lineShape.x;
-    float x = clamp(q.x, -hl, hl);                       // the nearest point along the line
-    float t = x / hl;                                    // -1 .. 1 from end to end
-    float height = u_lineShape.y * mix(1.0, u_linePlayAmp, L.w) * (1.0 - t * t);
-    float y = height * sin(3.14159265 * u_lineShape.w * t + L.z);
-    float d = length(vec2(q.x - x, q.y - y)) - u_lineShape.z;
-    float a = 1.0 - smoothstep(-1.0 / unit, 1.0 / unit, d);
-    col = mix(col, mix(u_lineColor, vec3(1.0), L.w), a);  // white while playing
+// Distance to an oval (an approximation, good for ovals that are only a little wider than tall).
+float ovalDistance(vec2 p, vec2 r) {
+  float k0 = length(p / r);
+  float k1 = length(p / (r * r));
+  return k1 > 0.0 ? k0 * (k0 - 1.0) / k1 : -min(r.x, r.y);
+}
+
+// Distance to a triangle (exact; Inigo Quilez's sdTriangle).
+float triangleDistance(vec2 p, vec2 p0, vec2 p1, vec2 p2) {
+  vec2 e0 = p1 - p0, e1 = p2 - p1, e2 = p0 - p2;
+  vec2 v0 = p - p0, v1 = p - p1, v2 = p - p2;
+  vec2 pq0 = v0 - e0 * clamp(dot(v0, e0) / dot(e0, e0), 0.0, 1.0);
+  vec2 pq1 = v1 - e1 * clamp(dot(v1, e1) / dot(e1, e1), 0.0, 1.0);
+  vec2 pq2 = v2 - e2 * clamp(dot(v2, e2) / dot(e2, e2), 0.0, 1.0);
+  float s = sign(e0.x * e2.y - e0.y * e2.x);
+  vec2 d = min(min(vec2(dot(pq0, pq0), s * (v0.x * e0.y - v0.y * e0.x)),
+                   vec2(dot(pq1, pq1), s * (v1.x * e1.y - v1.y * e1.x))),
+                   vec2(dot(pq2, pq2), s * (v2.x * e2.y - v2.y * e2.x)));
+  return -sqrt(d.x) * sign(d.y);
+}
+
+// Draw every bubble over col: the oval joined with its tail in the outline colour, and the same
+// shape, smaller by the outline's thickness, in the fill colour on top.
+vec3 drawBubbles(vec3 col) {
+  vec2 p = gl_FragCoord.xy;
+  for (int i = 0; i < MAX_BUBBLES; i++) {
+    if (i >= u_bubbleCount) break;
+    vec4 oval = u_bubbles[i * 3], tail = u_bubbles[i * 3 + 1], more = u_bubbles[i * 3 + 2];
+    float t = more.w;
+    float tailD = triangleDistance(p, tail.xy, tail.zw, more.xy);
+    float outer = min(ovalDistance(p - oval.xy, max(oval.zw, vec2(0.5))), tailD);  // (popping up, it starts at 0)
+    float inner = min(ovalDistance(p - oval.xy, max(oval.zw - t, vec2(0.5))), tailD + t);
+    col = mix(col, mix(u_bubbleColor, vec3(1.0), more.z), 1.0 - smoothstep(-1.0, 1.0, outer));  // white while playing
+    col = mix(col, mix(u_bubbleFill, u_bubblePlayingFill, more.z), 1.0 - smoothstep(-1.0, 1.0, inner));
   }
   return col;
 }
@@ -68,11 +87,11 @@ void main() {
   float halo = u_glow * 0.35 * exp(-max(d, 0.0) * 18.0);
   vec3 background = vec3(0.035, 0.035, 0.045);
   vec3 col = mix(background + u_color * halo, u_color, fill);
-  outColor = vec4(drawLines(col, unit), 1.0);           // lines on top, so a dragged line stays visible
+  outColor = vec4(drawBubbles(col), 1.0);               // bubbles on top, so a dragged bubble stays visible
 }`
 
 const UNIFORMS = ['u_res', 'u_center', 'u_radius', 'u_wobble', 'u_lobes', 'u_phase', 'u_squash', 'u_glow', 'u_color',
-  'u_lineCount', 'u_lines', 'u_lineShape', 'u_linePlayAmp', 'u_lineColor'] as const
+  'u_bubbleCount', 'u_bubbles', 'u_bubbleColor', 'u_bubbleFill', 'u_bubblePlayingFill'] as const
 type Uniform = (typeof UNIFORMS)[number]
 
 export function createOrbRenderer(canvas: HTMLCanvasElement): OrbRenderer {
@@ -103,9 +122,9 @@ export function createOrbRenderer(canvas: HTMLCanvasElement): OrbRenderer {
     gl.viewport(0, 0, w, h)
   }
 
-  const lineData = new Float32Array(MAX_LINES * 4)  // reused every frame
+  const bubbleData = new Float32Array(MAX_BUBBLES * 12)  // reused every frame
 
-  function draw(look: Look, phase: number, center: [x: number, y: number], lines: readonly UtteranceLine[]): void {
+  function draw(look: Look, phase: number, center: [x: number, y: number], bubbles: readonly BubbleShape[]): void {
     resize()
     gl.useProgram(program)
     gl.uniform2f(u.u_res, canvas.width, canvas.height)
@@ -119,16 +138,19 @@ export function createOrbRenderer(canvas: HTMLCanvasElement): OrbRenderer {
     gl.uniform1f(u.u_glow, look.glow)
     gl.uniform3fv(u.u_color, look.color)
 
-    const count = Math.min(lines.length, MAX_LINES)
+    // CSS pixels (y from the top) -> device pixels (y from the bottom)
+    const scale = canvas.width / Math.max(1, canvas.clientWidth)
+    const px = ([x, y]: [number, number]): [number, number] => [x * scale, canvas.height - y * scale]
+    const count = Math.min(bubbles.length, MAX_BUBBLES)
     for (let i = 0; i < count; i++) {
-      const { center: [x, y], phase: wave, glow } = lines[i]
-      lineData.set([x * canvas.width, (1 - y) * canvas.height, wave, glow], i * 4)
+      const { center: c, radii: [rx, ry], tail: [a, b, tip], outline, glow } = bubbles[i]
+      bubbleData.set([...px(c), rx * scale, ry * scale, ...px(a), ...px(b), ...px(tip), glow, outline * scale], i * 12)
     }
-    gl.uniform1i(u.u_lineCount, count)
-    gl.uniform4fv(u.u_lines, lineData)
-    gl.uniform4f(u.u_lineShape, LINE.halfLength, LINE.amplitude, LINE.thickness, LINE.waves)
-    gl.uniform1f(u.u_linePlayAmp, LINE.playing.amplitude)
-    gl.uniform3fv(u.u_lineColor, LINE.color)
+    gl.uniform1i(u.u_bubbleCount, count)
+    gl.uniform4fv(u.u_bubbles, bubbleData)
+    gl.uniform3fv(u.u_bubbleColor, BUBBLE.color)
+    gl.uniform3fv(u.u_bubbleFill, BUBBLE.fill)
+    gl.uniform3fv(u.u_bubblePlayingFill, BUBBLE.playingFill)
 
     gl.drawArrays(gl.TRIANGLES, 0, 3)
   }

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { createLink, type Link, type LinkCallbacks, type LinkStatus, type TranscriptionSettings } from './link.ts'
 
-type Handlers = Pick<LinkCallbacks, 'onVerdict' | 'onRecording' | 'onText' | 'onTranscription' | 'onTextError'>
+type Handlers = Pick<LinkCallbacks, 'onVerdict' | 'onUtterance' | 'onText' | 'onTranscription' | 'onTextError'>
 
 export interface VoiceLink {
   status: LinkStatus
@@ -26,7 +26,7 @@ export function useVoiceLink(callbacks: Handlers = {}): VoiceLink {
     const link = createLink({
       onStatus: setStatus,
       onVerdict: (v) => handlers.current.onVerdict?.(v),
-      onRecording: (key, u) => handlers.current.onRecording?.(key, u),
+      onUtterance: (u) => handlers.current.onUtterance?.(u),
       onText: (t) => handlers.current.onText?.(t),
       onTranscription: (available) => handlers.current.onTranscription?.(available),
       onTextError: (message) => handlers.current.onTextError?.(message),

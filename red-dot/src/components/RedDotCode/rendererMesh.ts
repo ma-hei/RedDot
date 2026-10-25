@@ -4,15 +4,17 @@
 // boxes, models) are usually drawn; renderer.ts instead computes every shape per pixel.
 //
 //   const renderer = createOrbRenderer(canvas)   // same interface as renderer.ts
-//   renderer.draw(look, phase, center, lines)
+//   renderer.draw(look, phase, center, bubbles)
 //   renderer.dispose()
 //
-// Three meshes, three small shader programs, drawn in this order (later = on top):
+// Two meshes and four small shader programs, drawn in this order (later = on top):
 //
-//   glow   a ring around the dot; its transparency fades outwards; added onto the background
-//   dot    a disc (triangle fan); the vertex shader moves its edge points to make the wobble
-//   lines  ONE strip of triangles, drawn once per utterance line with instancing (one draw
-//          call for all lines); the vertex shader bends it into the wave
+//   glow     a ring around the dot; its transparency fades outwards; added onto the background
+//   dot      a disc (triangle fan); the vertex shader moves its edge points to make the wobble
+//   bubbles  per speech bubble: the disc again, stretched into an oval, plus one triangle for its
+//            tail (no mesh: its three corners are uniforms). First both in the outline colour,
+//            then both again, smaller by the outline's thickness, in the fill colour: what's
+//            left of the first is the outline, also around the joint of oval and tail.
 //
 // Coordinates: everything is placed in device pixels (origin bottom left, like WebGL). The
 // projection matrix maps pixels to the GPU's clip space (-1..1); each object's model matrix
@@ -23,14 +25,13 @@
 // projection to a perspective one, turn on gl.DEPTH_TEST so near triangles hide far ones, and
 // light it in the fragment shader from the normals: max(dot(normal, toLight), 0.0).
 
-import { LINE } from './looks.ts'
-import type { Look } from './looks.ts'
+import { BUBBLE } from './looks.ts'
+import type { Look, RGB } from './looks.ts'
 import type { OrbRenderer } from './renderer.ts'
-import { MAX_LINES } from './utteranceLines.ts'
-import type { UtteranceLine } from './utteranceLines.ts'
+import { MAX_BUBBLES } from './speechBubbles.ts'
+import type { BubbleShape } from './speechBubbles.ts'
 
 const DOT_SEGMENTS = 128   // edge points of the disc: enough for a smooth, wobbling outline
-const LINE_SEGMENTS = 64   // points along a line: enough for a smooth wave
 const GLOW_REACH = 0.4     // how far the glow reaches beyond the edge (mesh units); exp(-18 * 0.4) ≈ 0.001
 const BACKGROUND = [0.035, 0.035, 0.045] as const
 
@@ -90,41 +91,23 @@ void main() {
   outColor = vec4(u_color, strength);                         // blended additively onto the background
 }`
 
-// The lines: one strip of triangles along t = -1 .. 1, two vertices per step (a_side = -1 / +1).
-// It's drawn once per line (instancing); a_line is per instance: centre in pixels, wave phase,
-// playing glow. The vertex shader bends the strip into the wave and pushes each vertex half
-// the stroke width along the wave's normal, so the stroke is equally thick everywhere.
-const LINE_VERTEX = /* glsl */ `#version 300 es
-layout(location = 0) in float a_t;
-layout(location = 1) in float a_side;
-layout(location = 2) in vec4 a_line;   // per instance: xy = centre (pixels), z = wave phase, w = glow 0..1
+// A bubble's oval: the dot's disc mesh, put in place and stretched by u_oval (no wobble).
+const OVAL_VERTEX = /* glsl */ `#version 300 es
+layout(location = 0) in float a_angle;
+layout(location = 1) in float a_edge;
 uniform mat4 u_projection;
-uniform float u_unit;                  // pixels per mesh unit (the shorter screen side)
-uniform vec4 u_shape;                  // half length, wave height, half thickness, waves
-uniform float u_playAmp;
-out float v_glow;
+uniform vec4 u_oval;         // centre, half width, half height (pixels)
 void main() {
-  float hl = u_shape.x;
-  float height = u_shape.y * mix(1.0, u_playAmp, a_line.w);
-  float k = 3.14159265 * u_shape.w;
-  float taper = 1.0 - a_t * a_t;                        // 0 at both ends, like a vibrating string
-  float wave = sin(k * a_t + a_line.z);
-  vec2 point = vec2(a_t * hl, height * taper * wave);
-  // the wave's slope, to find its normal: d(height * taper * wave)/dt, per unit of x
-  float slope = height * (-2.0 * a_t * wave + taper * k * cos(k * a_t + a_line.z)) / hl;
-  vec2 normal = normalize(vec2(-slope, 1.0));
-  vec2 pos = point + normal * a_side * u_shape.z;
-  gl_Position = u_projection * vec4(a_line.xy + pos * u_unit, 0.0, 1.0);
-  v_glow = a_line.w;
+  vec2 pos = u_oval.xy + a_edge * u_oval.zw * vec2(cos(a_angle), sin(a_angle));
+  gl_Position = u_projection * vec4(pos, 0.0, 1.0);
 }`
 
-const LINE_FRAGMENT = /* glsl */ `#version 300 es
-precision highp float;
-uniform vec3 u_lineColor;
-in float v_glow;
-out vec4 outColor;
+// A bubble's tail: one triangle, its corners given directly (gl_VertexID: which corner).
+const TAIL_VERTEX = /* glsl */ `#version 300 es
+uniform mat4 u_projection;
+uniform vec2 u_corners[3];   // pixels
 void main() {
-  outColor = vec4(mix(u_lineColor, vec3(1.0), v_glow), 1.0);   // white while playing
+  gl_Position = u_projection * vec4(u_corners[gl_VertexID], 0.0, 1.0);
 }`
 
 // ---------------- matrices (column-major, as WebGL expects) ----------------
@@ -166,13 +149,18 @@ function glowMesh(): Float32Array {  // triangle strip: inner and outer point at
   return new Float32Array(v)
 }
 
-function lineMesh(): Float32Array {  // triangle strip: both sides at each step along the line
-  const v: number[] = []  // per vertex: t, side
-  for (let i = 0; i <= LINE_SEGMENTS; i++) {
-    const t = (i / LINE_SEGMENTS) * 2 - 1
-    v.push(t, -1, t, 1)
-  }
-  return new Float32Array(v)
+/** The triangle a, b, c moved inwards by t on every side (shrunk towards its incentre). */
+function insetTriangle(a: [number, number], b: [number, number], c: [number, number], t: number): number[] {
+  const la = Math.hypot(b[0] - c[0], b[1] - c[1])   // each side's length, opposite its corner
+  const lb = Math.hypot(c[0] - a[0], c[1] - a[1])
+  const lc = Math.hypot(a[0] - b[0], a[1] - b[1])
+  const perimeter = la + lb + lc || 1
+  const ix = (la * a[0] + lb * b[0] + lc * c[0]) / perimeter   // the incentre
+  const iy = (la * a[1] + lb * b[1] + lc * c[1]) / perimeter
+  const area = Math.abs((b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1])) / 2
+  const inradius = (2 * area) / perimeter
+  const k = inradius > t ? (inradius - t) / inradius : 0
+  return [a, b, c].flatMap(([x, y]) => [ix + (x - ix) * k, iy + (y - iy) * k])
 }
 
 // ---------------- the renderer ----------------
@@ -183,7 +171,8 @@ export function createOrbRenderer(canvas: HTMLCanvasElement): OrbRenderer {
 
   const dot = makeProgram(gl, DOT_VERTEX, DOT_FRAGMENT)
   const glow = makeProgram(gl, GLOW_VERTEX, GLOW_FRAGMENT)
-  const line = makeProgram(gl, LINE_VERTEX, LINE_FRAGMENT)
+  const oval = makeProgram(gl, OVAL_VERTEX, DOT_FRAGMENT)
+  const tail = makeProgram(gl, TAIL_VERTEX, DOT_FRAGMENT)
 
   // A VAO (vertex array object) remembers which buffers feed which shader inputs, so drawing
   // an object later only needs bindVertexArray + draw.
@@ -191,20 +180,7 @@ export function createOrbRenderer(canvas: HTMLCanvasElement): OrbRenderer {
   const dotVao = makeVao(gl, dotData)
   const glowData = glowMesh()
   const glowVao = makeVao(gl, glowData)
-  const lineData = lineMesh()
-  const lineVao = makeVao(gl, lineData)
-
-  // Per-instance data for the lines: updated every frame, read once per line instead of once
-  // per vertex (vertexAttribDivisor = 1).
-  const instances = new Float32Array(MAX_LINES * 4)
-  const instanceBuffer = gl.createBuffer()
-  gl.bindVertexArray(lineVao.vao)
-  gl.bindBuffer(gl.ARRAY_BUFFER, instanceBuffer)
-  gl.bufferData(gl.ARRAY_BUFFER, instances.byteLength, gl.DYNAMIC_DRAW)
-  gl.enableVertexAttribArray(2)
-  gl.vertexAttribPointer(2, 4, gl.FLOAT, false, 0, 0)
-  gl.vertexAttribDivisor(2, 1)
-  gl.bindVertexArray(null)
+  const noInputs = gl.createVertexArray()   // the tail reads no vertex data, but drawing needs a VAO bound
 
   function resize(): void {
     const dpr = window.devicePixelRatio || 1
@@ -217,7 +193,7 @@ export function createOrbRenderer(canvas: HTMLCanvasElement): OrbRenderer {
     gl.viewport(0, 0, w, h)
   }
 
-  function draw(look: Look, phase: number, center: [x: number, y: number], lines: readonly UtteranceLine[]): void {
+  function draw(look: Look, phase: number, center: [x: number, y: number], bubbles: readonly BubbleShape[]): void {
     resize()
     const { width, height } = canvas
     const unit = Math.min(width, height)
@@ -252,25 +228,38 @@ export function createOrbRenderer(canvas: HTMLCanvasElement): OrbRenderer {
     gl.bindVertexArray(dotVao.vao)
     gl.drawArrays(gl.TRIANGLE_FAN, 0, dotData.length / 2)
 
-    // 3. all lines in ONE draw call: the strip, drawn `count` times with per-instance data
-    const count = Math.min(lines.length, MAX_LINES)
-    if (count > 0) {
-      for (let i = 0; i < count; i++) {
-        const { center: [x, y], phase: wave, glow: playing } = lines[i]
-        instances.set([x * width, (1 - y) * height, wave, playing], i * 4)
-      }
-      gl.useProgram(line.program)
-      gl.uniformMatrix4fv(line.u('u_projection'), false, projection)
-      gl.uniform1f(line.u('u_unit'), unit)
-      gl.uniform4f(line.u('u_shape'), LINE.halfLength, LINE.amplitude, LINE.thickness, LINE.waves)
-      gl.uniform1f(line.u('u_playAmp'), LINE.playing.amplitude)
-      gl.uniform3fv(line.u('u_lineColor'), LINE.color)
-      gl.bindVertexArray(lineVao.vao)
-      gl.bindBuffer(gl.ARRAY_BUFFER, instanceBuffer)
-      gl.bufferSubData(gl.ARRAY_BUFFER, 0, instances, 0, count * 4)
-      gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, lineData.length / 2, count)
+    // 3. the bubbles, in order (the last on top): outline shape, then the fill shape over it.
+    // CSS pixels (y from the top) -> device pixels (y from the bottom).
+    const scale = width / Math.max(1, canvas.clientWidth)
+    const px = ([x, y]: [number, number]): [number, number] => [x * scale, height - y * scale]
+    for (const bubble of bubbles.slice(-MAX_BUBBLES)) {
+      const c = px(bubble.center)
+      const [rx, ry] = [bubble.radii[0] * scale, bubble.radii[1] * scale]
+      const [a, b, tip] = bubble.tail.map(px)
+      const t = bubble.outline * scale
+      const mix = (from: RGB, to: RGB): RGB => [0, 1, 2].map((i) => from[i] + (to[i] - from[i]) * bubble.glow) as RGB
+      drawBubbleShape(projection, c, rx, ry, [...a, ...b, ...tip], mix(BUBBLE.color, [1, 1, 1]))   // white while playing
+      drawBubbleShape(projection, c, Math.max(0, rx - t), Math.max(0, ry - t), insetTriangle(a, b, tip, t),
+                      mix(BUBBLE.fill, BUBBLE.playingFill))
     }
     gl.bindVertexArray(null)
+  }
+
+  // One bubble's oval and tail in one colour.
+  function drawBubbleShape(projection: Float32Array, c: [number, number], rx: number, ry: number,
+                           corners: number[], color: RGB): void {
+    gl.useProgram(oval.program)
+    gl.uniformMatrix4fv(oval.u('u_projection'), false, projection)
+    gl.uniform4f(oval.u('u_oval'), c[0], c[1], rx, ry)
+    gl.uniform3fv(oval.u('u_color'), color)
+    gl.bindVertexArray(dotVao.vao)
+    gl.drawArrays(gl.TRIANGLE_FAN, 0, dotData.length / 2)
+    gl.useProgram(tail.program)
+    gl.uniformMatrix4fv(tail.u('u_projection'), false, projection)
+    gl.uniform2fv(tail.u('u_corners'), corners)
+    gl.uniform3fv(tail.u('u_color'), color)
+    gl.bindVertexArray(noInputs)
+    gl.drawArrays(gl.TRIANGLES, 0, 3)
   }
 
   // The uniforms the glow and the dot share: matrices, the wobbling edge, the colour.
@@ -286,9 +275,9 @@ export function createOrbRenderer(canvas: HTMLCanvasElement): OrbRenderer {
   }
 
   function dispose(): void {
-    for (const p of [dot, glow, line]) p.dispose()
-    for (const v of [dotVao, glowVao, lineVao]) v.dispose()
-    gl.deleteBuffer(instanceBuffer)
+    for (const p of [dot, glow, oval, tail]) p.dispose()
+    for (const v of [dotVao, glowVao]) v.dispose()
+    gl.deleteVertexArray(noInputs)
   }
 
   return { draw, dispose }

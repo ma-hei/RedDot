@@ -29,24 +29,31 @@
   height: 100%;
 }
 
-/* ---- the text under each line (lineLabels.ts places each one) ---- */
+/* ---- the text inside each bubble (bubbleLabels.ts places and sizes each one) ---- */
 .reddot-labels {
   position: absolute;
   inset: 0;
   overflow: hidden;
-  pointer-events: none;  /* taps and drags go through to the canvas */
+  pointer-events: none;  /* taps and drags go through to the canvas (the wheel scrolls: RedDot.tsx) */
 }
 .reddot-label {
   position: absolute;
   left: 0;
   top: 0;
   width: max-content;
-  color: #e4e4e7;
-  font: 15px/1.35 system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: #f4f4f5;
+  font: 14px/1.35 system-ui, -apple-system, "Segoe UI", sans-serif;
   text-align: center;
   overflow-wrap: anywhere;
-  text-shadow: 0 1px 3px #09090b;
+  text-shadow: 0 1px 3px #09090b;   /* readable also where it runs over the outline */
   transition: opacity 0.2s;
+  overflow-y: auto;      /* max-height comes from the bubble's size; a longer text scrolls */
+  overscroll-behavior: contain;
+  scrollbar-width: none; /* scrolled with the wheel over the bubble; no bar inside the bubble */
+}
+.reddot-label::-webkit-scrollbar { display: none; }
+.reddot-label.more-above {  /* longer than its bubble, with older text above: it fades out at the top */
+  mask-image: linear-gradient(to bottom, transparent, #000 1.2em);
 }
 .reddot-label.partial { opacity: 0.6; font-style: italic; }   /* may still change */
 .reddot-label.empty { opacity: 0.45; }                       /* "…" or "–" */
@@ -104,7 +111,7 @@
 .reddot-settings .note { margin: 0; color: #a1a1aa; font-size: 12px; }
 .reddot-settings .error { margin: 8px 0 0; color: #f87171; font-size: 12px; overflow-wrap: anywhere; }
 
-/* ---- the bin at the bottom: drop a line on it to remove it (RedDot.tsx) ---- */
+/* ---- the bin at the bottom: drop a bubble on it to remove it (RedDot.tsx) ---- */
 .reddot-bin {
   position: absolute;
   left: 50%;
@@ -121,7 +128,7 @@
   pointer-events: none;  /* only a drop target: taps and drags go to the canvas below */
   transition: transform 0.15s, color 0.15s, border-color 0.15s, background 0.15s;
 }
-.reddot-bin.target {     /* a line is held over it: letting go removes it */
+.reddot-bin.target {     /* a bubble is held over it: letting go removes it */
   transform: translateX(-50%) scale(1.25);
   color: #fafafa;
   border-color: #ef4444;

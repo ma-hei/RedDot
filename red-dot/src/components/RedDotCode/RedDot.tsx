@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { PointerEvent } from 'react'
-import { createLabels } from './lineLabels.ts'
+import type { MouseEvent, PointerEvent } from 'react'
+import { createLabels } from './bubbleLabels.ts'
+import type { Labels, LiveText } from './bubbleLabels.ts'
 import { LOOKS, advance, createOrbState } from './looks.ts'
 import type { Look, LookName, OrbState } from './looks.ts'
 import type { LinkStatus } from './link.ts'
@@ -10,8 +11,11 @@ import type { Choice } from './settings.ts'
 import { createOrbRenderer as createSdfRenderer } from './renderer.ts'
 import { createOrbRenderer as createMeshRenderer } from './rendererMesh.ts'
 import { useVoiceLink } from './useVoiceLink.ts'
-import { addLine, advanceLines, bringToFront, clampLine, createLine, lineAt, placeNewLine, playLine, removeLine } from './utteranceLines.ts'
-import type { LineText, Size, UtteranceLine } from './utteranceLines.ts'
+import {
+  addUtterance, advanceBubbles, bringToFront, bubbleAt, bubbleShape, endUtterance, findUtterance, moveBubble,
+  openBubble, placeNewBubble, playBubble, removeBubble,
+} from './speechBubbles.ts'
+import type { LineText, Size, SpeechBubble } from './speechBubbles.ts'
 import './RedDot.css'
 
 // Two renderers draw the same picture: renderer.ts (one shader computes every pixel, the
@@ -23,7 +27,7 @@ const createOrbRenderer =
 // The console hook (window.orb) is not part of the browser's own types: declare it.
 declare global {
   interface Window {
-    orb?: { LOOKS: Record<LookName, Look>; state: OrbState; lines: UtteranceLine[] }
+    orb?: { LOOKS: Record<LookName, Look>; state: OrbState; bubbles: SpeechBubble[] }
   }
 }
 
@@ -39,15 +43,36 @@ export interface RedDotProps {
 
 export default function RedDot({ onStatusChange }: RedDotProps) {
 	
-  	// ---- speech-to-text: the settings (⚙), and the text of the line still being spoken ----
+  	// ---- speech-to-text: the settings (⚙), and the text of what is still being said ----
   	const [choice, setChoice] = useState<Choice>(loadChoice)
   	const choiceRef = useRef(choice)       // for the animation loop, which runs outside React
   	const [available, setAvailable] = useState<boolean | null>(null)
   	const availableRef = useRef(available)  // for the animation loop, like choiceRef
   	const [textError, setTextError] = useState<string | null>(null)
-  	const pending = useRef<LineText | null>(null)
-  	// Text for a line that doesn't exist yet (in case it arrives first), by the line's key.
+  	// What is being said right now (Live mode), shown with the bubble it belongs to.
+  	const live = useRef<LiveText | null>(null)
+  	// Text for an utterance the page doesn't know yet (in case it arrives first), by its key.
   	const early = useRef(new Map<number, LineText>())
+
+  	// ---- the speech bubbles: one per press ----
+  	// The bubble of the current press, which the next utterance joins; null: the next one opens a new bubble.
+  	const openRef = useRef<SpeechBubble | null>(null)
+  	const closeBubble = useCallback(() => {
+    		if (openRef.current) openRef.current.open = false
+    		openRef.current = null
+  	}, [])
+  	// The current press's bubble, opened (popping up next to the dot) if there is none.
+  	const currentBubble = (): SpeechBubble | null => {
+    		const canvas = canvasRef.current
+    		if (!canvas) return null
+    		if (!openRef.current) {
+      			const size = { width: canvas.clientWidth, height: canvas.clientHeight }
+      			const binStrip = binRef.current ? canvas.getBoundingClientRect().bottom - binRef.current.getBoundingClientRect().top + 8 : 0
+      			openRef.current = openBubble(bubbles.current,
+        				placeNewBubble(bubbles.current, orb.current.center, LOOKS.pressed.radius, size, binStrip))
+    		}
+    		return openRef.current
+  	}
 
   	// ---- the server connection ----
   	const { status, press, release, cut, configure } = useVoiceLink({
@@ -55,28 +80,52 @@ export default function RedDot({ onStatusChange }: RedDotProps) {
       			if (v.speech) orb.current.lastSpeechAt = performance.now()
       			orb.current.level = Math.min(1, v.rms / 3000)
     		},
-    		// An utterance is finished: a new line next to the dot, holding its audio.
-    		onRecording: (key, recording) => {
-      			const canvas = canvasRef.current
-      			if (!canvas) return
-      			const size = { width: canvas.clientWidth, height: canvas.clientHeight }
-      			const at = placeNewLine(lines.current, orb.current.center, LOOKS.pressed.radius, size)
-      			const line = createLine(key, recording, at)
-      			line.text = early.current.get(key) ?? null
-      			early.current.delete(key)
-      			addLine(lines.current, line)
+    		// An utterance started: it joins the press's bubble (the first one makes it pop up), which
+    		// grows while it's spoken. Ended: its final length and audio. Discarded (a click, a cough): gone.
+    		onUtterance: (u) => {
+      			const found = findUtterance(bubbles.current, u.key)
+      			if (u.event === 'started') {
+        				const bubble = currentBubble()
+        				if (!bubble || found) return
+        				const utterance = addUtterance(bubble, u.key, u.seconds)
+        				utterance.text = early.current.get(u.key) ?? null
+        				early.current.delete(u.key)
+      			} else if (u.event === 'ended') {
+        				let utterance = found?.[1]
+        				if (!utterance) {          // an older server, without "started": it joins the press's bubble now
+          				const bubble = currentBubble()
+          				if (!bubble) return
+          				utterance = addUtterance(bubble, u.key, u.seconds, false)
+          				utterance.text = early.current.get(u.key) ?? null
+          				early.current.delete(u.key)
+        				}
+        				endUtterance(utterance, u.seconds, u.recording)
+      			} else if (found) {
+        				const [bubble, utterance] = found
+        				bubble.utterances.splice(bubble.utterances.indexOf(utterance), 1)
+        				if (bubble.utterances.length === 0) {   // it held nothing else: it goes again
+          				if (openRef.current === bubble) openRef.current = null
+          				removeBubble(bubbles.current, bubble)
+        				}
+      			}
     		},
-    		// Speech-to-text: for a line (by its key), or for the one still being spoken (line: null).
+    		// Speech-to-text: for an utterance (by its key), or for what is still being said (line: null).
     		onText: ({ line: key, text, final, confidence }) => {
       			const value = { text, final, confidence }
       			if (text) setTextError(null)
       			if (key === null) {
-        				pending.current = value
+        				// It belongs to the press's bubble, or (just let go) the one that press made.
+        				const bubble = openRef.current ?? live.current?.bubble ?? bubbles.current.at(-1)
+        				live.current = bubble ? { bubble, text: value } : null
         				return
       			}
-      			const line = lines.current.find((l) => l.key === key)
-      			if (line) line.text = value
-      			else early.current.set(key, value)
+      			const found = findUtterance(bubbles.current, key)
+      			if (!found) {
+        				early.current.set(key, value)
+        				return
+      			}
+      			found[1].text = value
+      			if (live.current?.bubble === found[0]) live.current = null   // now part of the utterance's own text
     		},
     		onTranscription: (yes) => {
       			availableRef.current = yes
@@ -97,30 +146,39 @@ export default function RedDot({ onStatusChange }: RedDotProps) {
     		if (!s.pressed) return
     		s.pressed = false
     		release()
-  	}, [release])
+    		closeBubble()                     // the press is over: its bubble is complete
+  	}, [release, closeBubble])
+
+  	// Hands-free: a click on the dot (or R) ends the current line, and with it the bubble.
+  	const endLine = useCallback(() => {
+    		cut()
+    		closeBubble()
+  	}, [cut, closeBubble])
 
 	// ---- talking: pressing the dot or R ----
 	const startTalking = useCallback(() => {
 		const s = orb.current
     		if (s.pressed || handsFreeRef.current) return
     		s.pressed = true                  // change the look right away, even while the mic starts
-    		pending.current = null            // a new press: no text yet
+    		live.current = null               // a new press: no text yet
+    		closeBubble()                     // (in case a press didn't end cleanly) a new press, a new bubble
     		press().then((ok) => { if (!ok) s.pressed = false })
-	}, [press])
+	}, [press, closeBubble])
 
   	const canvasRef = useRef<HTMLCanvasElement>(null)
-  	const labelsRef = useRef<HTMLDivElement>(null)   // the text under the lines, over the canvas
-  	const binRef = useRef<HTMLDivElement>(null)      // the bin at the bottom: a line dropped on it is removed
+  	const labelsRef = useRef<HTMLDivElement>(null)   // the text inside the bubbles, over the canvas
+  	const labelsApi = useRef<Labels | null>(null)    // what places that text (bubbleLabels.ts), for the wheel
+  	const binRef = useRef<HTMLDivElement>(null)      // the bin at the bottom: a bubble dropped on it is removed
   	const orb = useRef<OrbState>(createOrbState())
-  	// The utterance lines, oldest first (the last one is drawn on top).
-  	const lines = useRef<UtteranceLine[]>([])
-  	// What is being held: the dot, or a line. It follows the pointer. grabX/grabY: where on it
+  	// The speech bubbles, oldest first (the last one is drawn on top).
+  	const bubbles = useRef<SpeechBubble[]>([])
+  	// What is being held: the dot, or a bubble. It follows the pointer. grabX/grabY: where on it
   	// it was picked up (pointer minus its centre, in CSS pixels), so it moves without jumping.
-  	// For a line, also when and where it was pressed, to tell a tap (play) from a drag.
+  	// Also when and where it was pressed, to tell a tap (play, or end the line) from a drag.
   	const drag = useRef<
     		| { kind: 'dot'; pointerId: number; grabX: number; grabY: number
         		downAt: number; downX: number; downY: number; moved: boolean }
-    		| { kind: 'line'; line: UtteranceLine; pointerId: number; grabX: number; grabY: number
+    		| { kind: 'bubble'; bubble: SpeechBubble; pointerId: number; grabX: number; grabY: number
         		downAt: number; downX: number; downY: number; moved: boolean }
     		| null
   	>(null)
@@ -139,7 +197,8 @@ export default function RedDot({ onStatusChange }: RedDotProps) {
   	const changeChoice = useCallback((next: Choice) => {
     		setChoice(next)
     		setTextError(null)   // a problem with the old settings doesn't apply to the new ones
-  	}, [])
+    		closeBubble()        // while listening, the server ends the current line: the bubble ends with it
+  	}, [closeBubble])
 
   	// Hands-free: listen whenever the page is connected and visible. A hidden tab doesn't listen
   	// (privacy, and Google bills every streamed second, silence included).
@@ -150,6 +209,7 @@ export default function RedDot({ onStatusChange }: RedDotProps) {
       			if (!s.pressed) return
       			s.pressed = false
       			release()
+      			closeBubble()
     		}
     		if (!handsFree) {
       			stop()                       // e.g. switched to another mode: back to holding
@@ -160,14 +220,14 @@ export default function RedDot({ onStatusChange }: RedDotProps) {
         				stop()                     // after a reconnect, update() starts listening again
       			} else if (!s.pressed) {
         				s.pressed = true
-        				pending.current = null
+        				live.current = null
         				press().then((ok) => { if (!ok) s.pressed = false })
       			}
     		}
     		update()
     		document.addEventListener('visibilitychange', update)
     		return () => document.removeEventListener('visibilitychange', update)
-  	}, [handsFree, status, press, release])
+  	}, [handsFree, status, press, release, closeBubble])
 
   	// ---- the animation loop: starts when the canvas appears, stops when it goes away ----
   	useEffect(() => {
@@ -176,26 +236,24 @@ export default function RedDot({ onStatusChange }: RedDotProps) {
     		if (!canvas || !labelBox) return        // React sets the refs before effects run; this satisfies TypeScript
     		const renderer = createOrbRenderer(canvas)
     		const labels = createLabels(labelBox)
+    		labelsApi.current = labels
     		let frameId = 0
     		let last = performance.now()
     		const frame = (now: number) => {
       			const dt = Math.min(0.1, (now - last) / 1000)
       			last = now
-      			advance(orb.current, dt, now)
-      			advanceLines(lines.current, dt)
-      			renderer.draw(orb.current.look, orb.current.phase, orb.current.center, lines.current)
-      			// The text of the line being spoken, where that line will appear: "…" while the dot is
-      			// held, and in live mode the service's guesses until the line exists.
       			const size = { width: canvas.clientWidth, height: canvas.clientHeight }
+      			advance(orb.current, dt, now)
+      			advanceBubbles(bubbles.current, dt, now, size, orb.current.center)
+      			const shapes = bubbles.current.map((b) => bubbleShape(b, size))
+      			renderer.draw(orb.current.look, orb.current.phase, orb.current.center, shapes)
+      			// The text inside each bubble (with what is being said, in Live mode).
       			const on = choiceRef.current.mode !== 'off' && availableRef.current === true
-      			const text = pending.current?.text ? pending.current : orb.current.pressed ? { text: '', final: false, confidence: null } : null
-      			labels.sync(lines.current, on && text ? {
-        				text, at: placeNewLine(lines.current, orb.current.center, LOOKS.pressed.radius, size),
-      			} : null, size)
+      			labels.sync(on ? bubbles.current : [], live.current, size)
       			frameId = requestAnimationFrame(frame)
     		}
     		frameId = requestAnimationFrame(frame)
-    		window.orb = { LOOKS, state: orb.current, lines: lines.current }  // for experimenting in the browser console
+    		window.orb = { LOOKS, state: orb.current, bubbles: bubbles.current }  // for experimenting in the browser console
     		return () => {
       			cancelAnimationFrame(frameId)
       			renderer.dispose()
@@ -209,7 +267,7 @@ export default function RedDot({ onStatusChange }: RedDotProps) {
     		const isTalkKey = (e: KeyboardEvent) => e.key.toLowerCase() === 'r' && !e.ctrlKey && !e.metaKey && !e.altKey && !inForm(e)
     		const onKeyDown = (e: KeyboardEvent) => {
       			if (!isTalkKey(e) || e.repeat) return
-      			if (handsFreeRef.current) cut()   // hands-free: R ends the current line, like a click on the dot
+      			if (handsFreeRef.current) endLine()   // hands-free: R ends the current line, like a click on the dot
       			else startTalking()
     		}
     		const onKeyUp = (e: KeyboardEvent) => { if (e.key.toLowerCase() === 'r') stopTalking() }
@@ -221,10 +279,10 @@ export default function RedDot({ onStatusChange }: RedDotProps) {
       			document.removeEventListener('keyup', onKeyUp)
       			window.removeEventListener('blur', stopTalking)
     		}
-  	}, [startTalking, stopTalking, cut])
+  	}, [startTalking, stopTalking, endLine])
 
   	// The pointer on the canvas, in CSS pixels, and the canvas size.
-  	const pointer = (e: PointerEvent<HTMLCanvasElement>): [x: number, y: number, size: Size] => {
+  	const pointer = (e: MouseEvent<HTMLCanvasElement>): [x: number, y: number, size: Size] => {
     		const rect = e.currentTarget.getBoundingClientRect()
     		return [e.clientX - rect.left, e.clientY - rect.top, { width: rect.width, height: rect.height }]
   	}
@@ -257,11 +315,11 @@ export default function RedDot({ onStatusChange }: RedDotProps) {
     		orb.current.center = [x / rect.width, y / rect.height]
   	}
 
-  	// A line: a short tap plays it, anything else drags it (like the dot, but without recording).
+  	// A bubble: a short tap plays it, anything else drags it (like the dot, but without recording).
   	const TAP_MS = 400       // pressed for less than this...
   	const TAP_MOVE_PX = 8    // ...and moved less than this: a tap
 
-  	// Is the pointer over the bin? (a little generous, like the lines: easier to hit with a finger)
+  	// Is the pointer over the bin? (a little generous, like the bubbles: easier to hit with a finger)
   	const overBin = (e: PointerEvent<HTMLCanvasElement>): boolean => {
     		const r = binRef.current?.getBoundingClientRect()
     		const pad = 12
@@ -269,34 +327,37 @@ export default function RedDot({ onStatusChange }: RedDotProps) {
   	}
   	const showBinTarget = (on: boolean) => binRef.current?.classList.toggle('target', on)
 
-  	const moveLine = (e: PointerEvent<HTMLCanvasElement>) => {
+  	const dragBubble = (e: PointerEvent<HTMLCanvasElement>) => {
     		const d = drag.current
-    		if (d?.kind !== 'line' || d.pointerId !== e.pointerId) return
+    		if (d?.kind !== 'bubble' || d.pointerId !== e.pointerId) return
     		const [x, y, size] = pointer(e)
     		if (Math.hypot(x - d.downX, y - d.downY) > TAP_MOVE_PX) d.moved = true
     		if (!d.moved) return             // don't shift it by a pixel or two during a tap
-    		const [cx, cy] = clampLine(x - d.grabX, y - d.grabY, size)
-    		d.line.center = [cx / size.width, cy / size.height]
-    		showBinTarget(overBin(e))        // the bin lights up: letting go here removes the line
+    		moveBubble(d.bubble, x - d.grabX, y - d.grabY, size)
+    		showBinTarget(overBin(e))        // the bin lights up: letting go here removes the bubble
   	}
 
   	const isOnSomething = (e: PointerEvent<HTMLCanvasElement>): boolean => {
     		const [x, y, size] = pointer(e)
-    		return lineAt(lines.current, x, y, size) !== null || isOnDot(e)
+    		return bubbleAt(bubbles.current, x, y, size) !== null || isOnDot(e)
   	}
 
   	const letGo = (e: PointerEvent<HTMLCanvasElement>) => {
     		const d = drag.current
-    		if (d?.kind === 'line') {
+    		if (d?.kind === 'bubble') {
       			drag.current = null
       			showBinTarget(false)
       			const tap = !d.moved && performance.now() - d.downAt < TAP_MS
-      			if (tap && e.type === 'pointerup') playLine(d.line)  // a tap: play its utterance
-      			else if (d.moved && e.type === 'pointerup' && overBin(e)) removeLine(lines.current, d.line)  // dropped on the bin
+      			if (tap && e.type === 'pointerup') playBubble(d.bubble)  // a tap: play its utterances
+      			else if (d.moved && e.type === 'pointerup' && overBin(e)) {   // dropped on the bin
+        				if (openRef.current === d.bubble) openRef.current = null   // still talking: the next utterance opens a new one
+        				if (live.current?.bubble === d.bubble) live.current = null
+        				removeBubble(bubbles.current, d.bubble)
+      			}
     		} else if (d?.kind === 'dot' && handsFreeRef.current) {
       			drag.current = null
       			const tap = !d.moved && performance.now() - d.downAt < TAP_MS
-      			if (tap && e.type === 'pointerup') cut()  // hands-free: a click on the dot ends the current line
+      			if (tap && e.type === 'pointerup') endLine()  // hands-free: a click on the dot ends the current line
     		} else {
       			stopTalking()                    // the dot: stop recording, which also ends its drag
     		}
@@ -309,15 +370,15 @@ export default function RedDot({ onStatusChange }: RedDotProps) {
       			ref={canvasRef}
       			className="reddot"
       			onPointerDown={(e) => {
-        			// Lines first: they are drawn on top of the dot.
+        			// Bubbles first: they are drawn on top of the dot.
         			const [x, y, size] = pointer(e)
-        			const line = lineAt(lines.current, x, y, size)
-        			if (line) {
+        			const bubble = bubbleAt(bubbles.current, x, y, size)
+        			if (bubble) {
           				e.currentTarget.setPointerCapture(e.pointerId)
-          				bringToFront(lines.current, line)
+          				bringToFront(bubbles.current, bubble)
           				drag.current = {
-            					kind: 'line', line, pointerId: e.pointerId,
-            					grabX: x - line.center[0] * size.width, grabY: y - line.center[1] * size.height,
+            					kind: 'bubble', bubble, pointerId: e.pointerId,
+            					grabX: x - bubble.center[0] * size.width, grabY: y - bubble.center[1] * size.height,
             					downAt: performance.now(), downX: x, downY: y, moved: false,
           				}
           				e.currentTarget.style.cursor = 'grabbing'
@@ -338,9 +399,15 @@ export default function RedDot({ onStatusChange }: RedDotProps) {
       			// Holding the dot is a long press, which phones answer with a context menu ("Save
       			// image") and a short vibration, and which can cancel the touch (= letting go).
       			onContextMenu={(e) => e.preventDefault()}
+      			// The wheel over a bubble scrolls its text (the text itself lets the pointer through).
+      			onWheel={(e) => {
+        			const [x, y, size] = pointer(e)
+        			const bubble = bubbleAt(bubbles.current, x, y, size)
+        			if (bubble) labelsApi.current?.scrollBy(bubble, e.deltaY)
+      			}}
       			onPointerMove={(e) => {
         			if (drag.current?.kind === 'dot') moveDot(e)    // held: the dot follows
-        			else if (drag.current?.kind === 'line') moveLine(e)
+        			else if (drag.current?.kind === 'bubble') dragBubble(e)
         			else e.currentTarget.style.cursor = isOnSomething(e) ? 'grab' : 'default'
       			}}
     		/>

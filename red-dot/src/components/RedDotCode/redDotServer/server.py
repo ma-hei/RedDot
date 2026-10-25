@@ -25,10 +25,16 @@ WebSocket /ws:
                            with a new one (live speech-to-text, where the page listens all the time
                            and a click on the dot starts a new line)
     server -> page  text   {"type": "verdict", "speech": bool, "rms": int}   one per chunk
+                    text   {"type": "utterance", "event": "started", "first": n, "seconds": s}
+                           speech was heard: an utterance starts with chunk n (s: its length so far,
+                           including the audio kept from just before)
                     text   {"type": "utterance", "event": "ended", "first": n, "last": m, "seconds": s}
                            an utterance is complete: it consists of the chunks numbered first..last
                            (counted from 1 per connection, in the order the page sent them). The page
                            kept those chunks itself, so the audio doesn't travel back.
+                    text   {"type": "utterance", "event": "discarded", "first": n}
+                           the utterance that started with chunk n had too little speech (a click,
+                           a cough): there won't be an "ended" for it
                     text   {"type": "transcription", ...}, {"type": "text", ...}, {"type": "text_error", ...}
                            speech-to-text, see transcriber.py
 """
@@ -126,9 +132,13 @@ async def ws_endpoint(websocket: WebSocket) -> None:
 
     async def utterance_done(ev: UtteranceEvent, why: str = "") -> None:
         report(ev, why)
-        if ev.event == "ended":
-            # The utterance is the last ev.chunks chunks received, up to and including this one.
-            first = chunks - ev.chunks + 1
+        # The utterance is the last ev.chunks chunks received, up to and including this one.
+        first = chunks - ev.chunks + 1
+        if ev.event == "started":
+            await send({"type": "utterance", "event": "started", "first": first, "seconds": round(ev.seconds, 1)})
+        elif ev.event == "discarded":
+            await send({"type": "utterance", "event": "discarded", "first": first})
+        elif ev.event == "ended":
             await send({"type": "utterance", "event": "ended", "first": first, "last": chunks,
                         "seconds": round(ev.seconds, 1)})
             await transcriber.utterance(first, chunks, ev.audio)
