@@ -12,9 +12,10 @@
 //   glow     a ring around the dot; its transparency fades outwards; added onto the background
 //   dot      a disc (triangle fan); the vertex shader moves its edge points to make the wobble
 //   bubbles  per speech bubble (a cloud): the disc again, many times (instancing), as its oval core,
-//            its puffs and its trail's puffs. First all of them in the outline colour, then all
-//            again, smaller by the outline's thickness, in the fill colour: what's left of the
-//            first is the outline, around the whole cloud and between the puffs' bumps.
+//            its puffs and its trail's puffs. The triangles only say where the cloud is; its
+//            plastic look (white, gray towards the edges, a sheen) needs the distance to the
+//            cloud's edge, so the fragment shader computes that per pixel, with renderer.ts's
+//            code (CLOUD_GLSL): flat-coloured circles would show where the puffs overlap.
 //
 // Coordinates: everything is placed in device pixels (origin bottom left, like WebGL). The
 // projection matrix maps pixels to the GPU's clip space (-1..1); each object's model matrix
@@ -26,7 +27,8 @@
 // light it in the fragment shader from the normals: max(dot(normal, toLight), 0.0).
 
 import { BUBBLE } from './looks.ts'
-import type { Look, RGB } from './looks.ts'
+import type { Look } from './looks.ts'
+import { CLOUD_GLSL } from './renderer.ts'
 import type { OrbRenderer } from './renderer.ts'
 import { MAX_BUBBLES, cloudPuffs } from './speechBubbles.ts'
 import type { BubbleShape, Puff } from './speechBubbles.ts'
@@ -93,6 +95,27 @@ void main() {
 
 // A bubble's ovals (core, puffs, trail): the dot's disc mesh, drawn once per oval (instancing),
 // each put in place and stretched by its own a_oval (no wobble).
+// The cloud's colour: white plastic, from the distance to its edge (or to a trail puff's).
+const CLOUD_FRAGMENT = /* glsl */ `#version 300 es
+precision highp float;
+uniform vec4 u_cloud;   // centre, how far the cloud reaches across and up (pixels)
+uniform vec4 u_trail;   // the trail puffs' centres
+uniform vec4 u_more;    // the trail puffs' radii, unused, seed
+${CLOUD_GLSL}
+out vec4 outColor;
+void main() {
+  vec2 p = gl_FragCoord.xy;
+  vec2 c = u_cloud.xy, r = max(u_cloud.zw, vec2(0.5));
+  vec3 col = plastic(p, cloudDistance(p, c, r, u_more.w).y, SHADE * r.y, c, r);
+  for (int j = 0; j < 2; j++) {   // a trail puff, where this pixel is in one
+    vec2 t = j == 0 ? u_trail.xy : u_trail.zw;
+    float tr = max(j == 0 ? u_more.x : u_more.y, 0.5);
+    float dt = length(p - t) - tr;
+    if (dt < 0.0) col = plastic(p, dt, SHADE * tr, t, vec2(tr));
+  }
+  outColor = vec4(col, 1.0);
+}`
+
 const OVALS_VERTEX = /* glsl */ `#version 300 es
 layout(location = 0) in float a_angle;
 layout(location = 1) in float a_edge;
@@ -150,7 +173,7 @@ export function createOrbRenderer(canvas: HTMLCanvasElement): OrbRenderer {
 
   const dot = makeProgram(gl, DOT_VERTEX, DOT_FRAGMENT)
   const glow = makeProgram(gl, GLOW_VERTEX, GLOW_FRAGMENT)
-  const ovals = makeProgram(gl, OVALS_VERTEX, DOT_FRAGMENT)
+  const ovals = makeProgram(gl, OVALS_VERTEX, CLOUD_FRAGMENT)
 
   // A VAO (vertex array object) remembers which buffers feed which shader inputs, so drawing
   // an object later only needs bindVertexArray + draw.
@@ -218,32 +241,30 @@ export function createOrbRenderer(canvas: HTMLCanvasElement): OrbRenderer {
     gl.bindVertexArray(dotVao.vao)
     gl.drawArrays(gl.TRIANGLE_FAN, 0, dotData.length / 2)
 
-    // 3. the bubbles, in order (the last on top): outline shape, then the fill shape over it.
-    // The shapes are in CSS pixels (y from the top); drawOvals turns them into device pixels (y from the bottom).
+    // 3. the bubbles, in order (the last on top): each cloud's core, puffs and trail in one draw.
+    // The shapes are in CSS pixels (y from the top); drawCloud turns them into device pixels (y from the bottom).
     const scale = width / Math.max(1, canvas.clientWidth)
-    for (const bubble of bubbles.slice(-MAX_BUBBLES)) {
-      const { core, puffs } = cloudPuffs(bubble.center, bubble.radii, bubble.seed)
-      const circles: Puff[] = [...puffs, ...bubble.trail]
-      const t = bubble.outline
-      const mix = (from: RGB, to: RGB): RGB => [0, 1, 2].map((i) => from[i] + (to[i] - from[i]) * bubble.glow) as RGB
-      // Outline colour (white while playing), then the same shapes smaller by t in the fill colour.
-      drawOvals(projection, scale, bubble.center, core, circles, 0, mix(BUBBLE.color, [1, 1, 1]))
-      drawOvals(projection, scale, bubble.center, core, circles, t, mix(BUBBLE.fill, BUBBLE.playingFill))
-    }
+    for (const bubble of bubbles.slice(-MAX_BUBBLES)) drawCloud(projection, scale, bubble)
     gl.bindVertexArray(null)
   }
 
-  // One bubble's core and circles (CSS pixels), each smaller by `shrink`, in one colour: one instanced draw.
-  function drawOvals(projection: Float32Array, scale: number, center: [number, number], core: [number, number],
-                     circles: Puff[], shrink: number, color: RGB): void {
+  // One bubble: its core, puffs and trail puffs (where it is), shaded by CLOUD_FRAGMENT: one instanced draw.
+  function drawCloud(projection: Float32Array, scale: number, bubble: BubbleShape): void {
     const { height } = canvas
-    const put = (i: number, x: number, y: number, rx: number, ry: number) =>
-      ovalData.set([x * scale, height - y * scale, Math.max(0, rx - shrink) * scale, Math.max(0, ry - shrink) * scale], i * 4)
-    put(0, center[0], center[1], core[0], core[1])
-    circles.forEach(([x, y, r], i) => put(i + 1, x, y, r, r))
+    const x = (v: number) => v * scale
+    const y = (v: number) => height - v * scale
+    const { core, puffs } = cloudPuffs(bubble.center, bubble.radii, bubble.seed)
+    const circles: Puff[] = [...puffs, ...bubble.trail]
+    ovalData.set([x(bubble.center[0]), y(bubble.center[1]), x(core[0]), x(core[1])], 0)
+    circles.forEach(([cx, cy, r], i) => ovalData.set([x(cx), y(cy), x(r), x(r)], (i + 1) * 4))
+    const [t1, t2] = bubble.trail
     gl.useProgram(ovals.program)
     gl.uniformMatrix4fv(ovals.u('u_projection'), false, projection)
-    gl.uniform3fv(ovals.u('u_color'), color)
+    gl.uniform4f(ovals.u('u_cloud'), x(bubble.center[0]), y(bubble.center[1]), x(bubble.radii[0]), x(bubble.radii[1]))
+    gl.uniform4f(ovals.u('u_trail'), x(t1[0]), y(t1[1]), x(t2[0]), y(t2[1]))
+    gl.uniform4f(ovals.u('u_more'), x(t1[2]), x(t2[2]), 0, bubble.seed)
+    gl.uniform3fv(ovals.u('u_cloudFill'), BUBBLE.fill)
+    gl.uniform3fv(ovals.u('u_cloudEdge'), BUBBLE.edge)
     gl.bindVertexArray(ovalsVao.vao)
     gl.bindBuffer(gl.ARRAY_BUFFER, ovalBuffer)
     gl.bufferSubData(gl.ARRAY_BUFFER, 0, ovalData, 0, (circles.length + 1) * 4)

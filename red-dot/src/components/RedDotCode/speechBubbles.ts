@@ -51,7 +51,7 @@ export interface SpeechBubble {
   radius: number                  // half its height now (eased towards targetRadius)
   age: number                     // seconds since it popped up
   playing: boolean
-  glow: number                    // 0..1, eased towards 1 while playing (the renderers use it)
+  glow: number                    // 0..1, eased towards 1 while playing: how much it pulsates
 }
 
 /** The canvas size in CSS pixels. */
@@ -70,22 +70,22 @@ export interface BubbleShape {
   radii: [rx: number, ry: number]                       // how far the cloud reaches (its puffs' outer edges)
   seed: number                                          // where its puffs sit (radians): each cloud a little different
   trail: Puff[]                                         // small puffs towards where the tail points
-  outline: number                                       // its thickness
-  glow: number
 }
 
 /**
  * The cloud's puffs: BUBBLE.puffs circles, evenly around an oval that's smaller than the cloud by
- * a puff's radius, each a little bigger or smaller. The core is that smaller oval (filled), so
- * the cloud is the core plus the puffs. renderer.ts computes the same in its shader (keep both alike).
+ * a puff's radius, each a little bigger or smaller. The core is a filled oval a little bigger than
+ * that (BUBBLE.coreInset), so the cloud is the core plus the puffs. renderer.ts computes the same
+ * in its shader (keep both alike).
  */
 export function cloudPuffs([cx, cy]: [number, number], [rx, ry]: [number, number], seed: number): { core: [number, number]; puffs: Puff[] } {
   const r = ry * BUBBLE.puffSize
-  const core: [number, number] = [Math.max(0, rx - r), Math.max(0, ry - r)]
+  const ring: [number, number] = [Math.max(0, rx - r), Math.max(0, ry - r)]   // the puffs' centres lie on this oval
+  const core: [number, number] = [Math.max(0, rx - r * BUBBLE.coreInset), Math.max(0, ry - r * BUBBLE.coreInset)]
   const puffs: Puff[] = []
   for (let k = 0; k < BUBBLE.puffs; k++) {
     const angle = (2 * Math.PI * k) / BUBBLE.puffs + seed
-    puffs.push([cx + core[0] * Math.cos(angle), cy + core[1] * Math.sin(angle),
+    puffs.push([cx + ring[0] * Math.cos(angle), cy + ring[1] * Math.sin(angle),
                 r * (1 + BUBBLE.puffVariety * Math.sin(k * 2.3 + seed * 3))])
   }
   return { core, puffs }
@@ -146,7 +146,7 @@ export function targetRadius(bubble: SpeechBubble, now = performance.now()): num
   return BUBBLE.minRadius + (BUBBLE.maxRadius - BUBBLE.minRadius) * share
 }
 
-/** Every frame: grow towards the target size, pop, breathe and glow; while open, move with the dot
+/** Every frame: grow towards the target size, pop, breathe and pulsate (playing); while open, move with the dot
  *  and point the tail at it; keep it away from the dot (while it hasn't been dragged) and on the screen. */
 export function advanceBubbles(bubbles: SpeechBubble[], dt: number, now: number, size: Size,
                                dotCenter: [number, number]): void {
@@ -195,10 +195,12 @@ function popScale(age: number): number {
   return 1 + t * t * ((s + 1) * t + s)
 }
 
-/** Its oval's half width and height as shown now: size, popping up, breathing while open. */
+/** Its oval's half width and height as shown now: size, popping up, breathing while open,
+ *  pulsating while it plays. */
 function shownRadii(bubble: SpeechBubble, size: Size): [rx: number, ry: number] {
   const breathe = bubble.open ? 1 + BUBBLE.breathe * Math.sin(bubble.age * BUBBLE.breatheSpeed) : 1
-  const ry = bubble.radius * unit(size) * popScale(bubble.age) * breathe
+  const pulse = 1 + BUBBLE.pulse * bubble.glow * Math.sin(bubble.age * BUBBLE.pulseSpeed)
+  const ry = bubble.radius * unit(size) * popScale(bubble.age) * breathe * pulse
   return [ry * BUBBLE.aspect, ry]
 }
 
@@ -226,8 +228,6 @@ export function bubbleShape(bubble: SpeechBubble, size: Size): BubbleShape {
     radii: [rx, ry],
     seed: seedOf(bubble),
     trail: BUBBLE.trail.map(({ at, size: r }): Puff => [cx + dx * (reach + at * ry), cy + dy * (reach + at * ry), r * ry]),
-    outline: Math.max(1, BUBBLE.outline * unit(size)),
-    glow: bubble.glow,
   }
 }
 

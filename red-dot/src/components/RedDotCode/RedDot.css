@@ -41,11 +41,11 @@
   left: 0;
   top: 0;
   width: max-content;
-  color: #f4f4f5;
+  color: #27272a;        /* dark on the white cloud */
   font: 14px/1.35 system-ui, -apple-system, "Segoe UI", sans-serif;
   text-align: center;
   overflow-wrap: anywhere;
-  text-shadow: 0 1px 3px #09090b;   /* readable also where it runs over the outline */
+  text-shadow: 0 0 3px #ffffffcc, 0 0 1px #ffffff;   /* readable also where it runs over the gray edge */
   transition: opacity 0.2s;
   overflow-y: auto;      /* max-height comes from the bubble's size; a longer text scrolls */
   overscroll-behavior: contain;
@@ -60,7 +60,7 @@
 .reddot-label .confidence {
   margin-left: 0.5em;
   font-size: 0.75em;
-  color: #a1a1aa;
+  color: #71717a;
   font-variant-numeric: tabular-nums;
 }
 

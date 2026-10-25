@@ -41,17 +41,18 @@ type Blend = 'online' | 'pressed' | 'speech'
 // ---------------- the speech bubbles: design them here ----------------
 // One bubble per press of the dot: it pops up when the first utterance starts and grows with the
 // seconds of speech it holds, up to its full size. A cloud (round puffs around an oval) with a
-// trail of small puffs that points at the dot while the press goes on, and keeps that direction afterwards.
+// trail of small puffs that points at the dot while the press goes on, and keeps that direction
+// afterwards. It looks like white plastic: white inside, gray towards its edges, a soft sheen.
 // Sizes are shares of the shorter screen side, like the dot's radius.
 export const BUBBLE = {
   minRadius: 0.04,                    // half its height when it pops up
   maxRadius: 0.15,                    // half its height at full size
   fullSeconds: 20,                    // this much speech makes it full size (it grows fastest at first)
   aspect: 1.35,                       // width / height
-  outline: 0.005,                     // the outline's thickness
   puffs: 8,                           // round puffs around the cloud's edge
   puffSize: 0.42,                     // a puff's radius (share of its half height)...
   puffVariety: 0.12,                  // ...each a little bigger or smaller, by up to this share
+  coreInset: 0.6,                     // the filled oval inside: smaller than the cloud by this share of a puff's radius
   // The trail towards the dot: small puffs, each this far beyond the cloud's edge, this big (both
   // shares of its half height). tail: how far the trail reaches, for keeping room next to the dot.
   trail: [{ at: 0.32, size: 0.16 }, { at: 0.7, size: 0.09 }],
@@ -60,10 +61,12 @@ export const BUBBLE = {
   popSeconds: 0.35,                   // popping up: from nothing to its size, overshooting a little
   breathe: 0.035,                     // while its press goes on, its size swings by this share...
   breatheSpeed: 3,                    // ...this fast (radians per second)
-  color: [0.95, 0.72, 0.70] as RGB,   // the outline: a pale red
-  fill: [0.16, 0.06, 0.07] as RGB,    // inside: a dark red, so the dot and text stand out
-  // While its utterances play, the outline turns white and the inside lighter.
-  playingFill: [0.36, 0.12, 0.13] as RGB,
+  fill: [0.96, 0.96, 0.97] as RGB,    // inside: (almost) white...
+  edge: [0.58, 0.59, 0.63] as RGB,    // ...turning gray towards the edges...
+  shade: 0.45,                        // ...over this far in from the edge (share of its half height; a trail puff: of its radius)
+  sheen: 0.22,                        // a soft highlight towards the upper left, this bright (0: none)
+  pulse: 0.07,                        // while its utterances play, it pulsates: its size swings by this share...
+  pulseSpeed: 7,                      // ...this fast (radians per second, about once a second)
 }
 
 // How quickly the dot glides to a new look (per second; higher = snappier).
