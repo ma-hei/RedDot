@@ -1,25 +1,35 @@
-// The connection to the lab server: WebSocket, microphone, push-to-talk. No React.
+// Voice input: microphone, speech detection and utterances, all in the browser; with speech-to-text
+// also the connection to the backend, which only transcribes. No React.
 //
-//   const link = createLink({ onStatus, onVerdict, onUtterance, onText, onTranscription, onTextError })
+//   const link = createLink({ transcription, onStatus, onVerdict, onUtterance, onText, onTranscription, onTextError })
 //   await link.press()   // start listening (opens the mic on first use); false if it couldn't
-//   link.release()       // stop listening; the server ends the utterance
-//   link.cut()           // while listening: end the current line here and go on with a new one
-//   link.configure(s)    // speech-to-text settings (kept and sent again after a reconnect)
+//   link.release()       // stop listening; ends the utterance being recorded
+//   link.cut()           // while listening: end the current utterance here and go on with a new one
+//   link.configure(s)    // speech-to-text settings (kept, and sent again after a reconnect)
 //   link.dispose()       // close everything (a React component unmounting)
 //
-// ---------------- the protocol (see server.py) ----------------
-// Page -> server: {"type": "mic", "on": bool} and 100 ms PCM chunks (binary) while pressed.
-// Server -> page: one verdict per chunk, and "started" / "ended" (or "discarded") per utterance.
-// Speech-to-text (see transcriber.py): page -> server {"type": "settings", ...}; server -> page
-// "transcription" (available or not), "text" (for a line, or for the one still being spoken),
-// "text_error".
+// Every 100 ms chunk is judged by Silero VAD (speechDetector.ts) and cut into utterances
+// (utterances.ts), one after another in a queue (judging is asynchronous, the order must stay).
+// The page numbers the chunks it records, from 1, without ever starting over; an utterance is
+// named (its key) by its first chunk's number.
 //
-// Recordings: the page numbers the chunks it sends (from 1 per connection) and keeps the last
-// KEEP_SECONDS of them. When the server says "utterance ended: chunks 12..38", the page
-// assembles those chunks itself, so the audio never has to travel back from the server.
+// ---------------- with speech-to-text: the protocol (see server.py) ----------------
+// Page -> server, while a press goes on (and the backend was reachable when it started):
+//   {"type": "mic", "on": true, "chunk": n}       a press starts; the next audio chunk is number n
+//   binary, 3200 bytes                             each 100 ms chunk of 16 kHz 16-bit mono PCM
+//   {"type": "utterance", "event": "ended", "first": n, "last": m}   transcribe chunks n..m
+//   {"type": "cut"}                                a new stream from here (a click with "Dot always
+//                                                  on", the 280 s limit, new settings)
+//   {"type": "mic", "on": false}                   the press is over (after its last utterance)
+// And any time: {"type": "settings", ...} (see transcriber.py). Server -> page: "transcription"
+// (available or not), "text" (for an utterance, or for what is still being said), "text_error".
 
-import { CHUNK_SAMPLES, openMicrophone, SAMPLE_RATE } from './microphone.ts'
+import { openMicrophone, SAMPLE_RATE } from './microphone.ts'
 import type { Microphone } from './microphone.ts'
+import { createSpeechDetector } from './speechDetector.ts'
+import type { SpeechDetector } from './speechDetector.ts'
+import { createUtteranceRecorder } from './utterances.ts'
+import type { UtteranceEvent as RecorderEvent } from './utterances.ts'
 
 export interface Verdict {
   type: 'verdict'
@@ -27,20 +37,13 @@ export interface Verdict {
   rms: number                        // loudness of the chunk (16-bit scale)
 }
 
-// What the server says about an utterance (see server.py): it started, ended, or had too little speech.
-type UtteranceMessage =
-  | { type: 'utterance'; event: 'started'; first: number; seconds: number }
-  | { type: 'utterance'; event: 'ended'; first: number; last: number; seconds: number }
-  | { type: 'utterance'; event: 'discarded'; first: number }
-
-/** An utterance, named by its key: its first chunk. "ended" carries its audio (null if the page
- *  doesn't have all of its chunks any more). */
+/** An utterance, named by its key: its first chunk. "ended" carries its audio. */
 export type UtteranceEvent =
   | { event: 'started'; key: number; seconds: number }
   | { event: 'ended'; key: number; seconds: number; recording: Recording | null }
   | { event: 'discarded'; key: number }
 
-/** Speech-to-text for one line (by its key: the first chunk), or for the line still being spoken (null). */
+/** Speech-to-text for one utterance (by its key: the first chunk), or for what is still being said (null). */
 export interface TextMessage {
   type: 'text'
   line: number | null
@@ -64,14 +67,14 @@ export interface Recording {
   seconds: number
 }
 
-// A "discriminated union": the `type` field tells TypeScript which of the two it is.
+// A "discriminated union": the `type` field tells TypeScript which one it is.
 type ServerMessage =
-  | Verdict | UtteranceMessage | TextMessage
+  | TextMessage
   | { type: 'transcription'; available: boolean }
   | { type: 'text_error'; message: string }
 
-// 'unavailable': only localLink.ts (its speech detector couldn't load).
-export type LinkStatus = 'connecting' | 'connected' | 'disconnected' | `microphone blocked: ${string}` | `unavailable: ${string}`
+/** Whether the dot can listen: 'connecting' while the speech detector loads. */
+export type LinkStatus = 'connecting' | 'connected' | `microphone blocked: ${string}` | `unavailable: ${string}`
 
 export interface LinkCallbacks {
   onStatus?: (status: LinkStatus) => void
@@ -80,6 +83,10 @@ export interface LinkCallbacks {
   onText?: (text: TextMessage) => void
   onTranscription?: (available: boolean) => void
   onTextError?: (message: string) => void
+}
+
+export interface LinkOptions extends LinkCallbacks {
+  transcription?: boolean      // speech-to-text through the backend (VITE_SPEECH_TO_TEXT=1)
 }
 
 export interface Link {
@@ -94,42 +101,83 @@ export interface Link {
 // Empty, as in development: the page's own address, which Vite's proxy forwards to the backend.
 const BACKEND_URL = (import.meta.env.VITE_BACKEND_URL ?? '').replace(/\/+$/, '')
 
-/** "/healthz" -> "https://reddot.culturalcapital.biz/healthz" (or just "/healthz" in development) */
+/** "/healthz" -> "https://api.example.com/healthz" (or just "/healthz" in development) */
 function httpUrl(path: string): string {
   return BACKEND_URL + path
 }
 
-/** "/ws" -> "wss://reddot.culturalcapital.biz/ws" (https -> wss, http -> ws) */
+/** "/ws" -> "wss://api.example.com/ws" (https -> wss, http -> ws) */
 function wsUrl(path: string): string {
   return (BACKEND_URL || location.origin).replace(/^http/, 'ws') + path
 }
 
-const KEEP_SECONDS = 300              // an utterance is at most 15 s, or a whole press (speech-to-text live or per press, < 5 min)
-const KEEP_CHUNKS = KEEP_SECONDS * SAMPLE_RATE / CHUNK_SAMPLES
+const UNREACHABLE = 'Speech-to-text: the backend can\'t be reached (is it running?)'
 
-export function createLink({ onStatus = () => {}, onVerdict = () => {}, onUtterance = () => {}, onText = () => {},
-                             onTranscription = () => {}, onTextError = () => {} }: LinkCallbacks = {}): Link {
-  let ws: WebSocket | null = null
+export function createLink({ transcription = false, onStatus = () => {}, onVerdict = () => {}, onUtterance = () => {},
+                             onText = () => {}, onTranscription = () => {}, onTextError = () => {} }: LinkOptions = {}): Link {
+  // ---------------- in the browser: microphone, speech detection, utterances ----------------
+  let detector: SpeechDetector | null = null
   let mic: Promise<Microphone> | null = null  // opened on the first press, kept (see microphone.ts)
-  let held = false      // press() called, release() not yet
-  let talking = false   // held, mic ready and the server told: audio is being sent
+  let held = false        // press() called, release() not yet
+  let talking = false     // held and the mic is ready: chunks are recorded and judged
   let disposed = false
-  let settings: TranscriptionSettings | null = null  // sent on every (re)connect
-  // The chunks sent on this connection, numbered like the server counts them (see server.py).
-  let sentChunks = 0
-  const kept = new Map<number, ArrayBuffer>()
+  let chunkNumber = 0     // the last recorded chunk's number
+  const recorder = createUtteranceRecorder()
+  let queue: Promise<void> = Promise.resolve()
 
-  // "Chunks first..last are an utterance": put them together. Returns null if some are missing
-  // (older than KEEP_SECONDS, or from before a reconnect).
-  function assemble(first: number, last: number): Int16Array | null {
-    const pcm = new Int16Array((last - first + 1) * CHUNK_SAMPLES)
-    for (let n = first; n <= last; n++) {
-      const chunk = kept.get(n)
-      if (!chunk) return null
-      pcm.set(new Int16Array(chunk), (n - first) * CHUNK_SAMPLES)
-    }
-    return pcm
+  const later = (job: () => Promise<void> | void) => {
+    queue = queue.then(job).catch((err) => console.error('speech detection:', err))
   }
+
+  // An utterance started (a bubble pops up), ended (with its audio) or was dropped. With
+  // speech-to-text, the backend gets each ended one to transcribe. fromFeed: the recorder ended it
+  // while listening (a pause, or its time limit), not finish() (letting go, a click, new settings).
+  function done(ev: RecorderEvent | null, fromFeed = false): void {
+    if (!ev) return
+    if (ev.event === 'started') {
+      onUtterance({ event: 'started', key: ev.first, seconds: ev.seconds })
+    } else if (ev.event === 'discarded') {
+      onUtterance({ event: 'discarded', key: ev.first })
+    } else {
+      onUtterance({ event: 'ended', key: ev.first, seconds: ev.seconds,
+                    recording: { pcm: ev.pcm, sampleRate: SAMPLE_RATE, seconds: ev.seconds } })
+      if (streaming) {
+        send(JSON.stringify({ type: 'utterance', event: 'ended', first: ev.first, last: ev.last }))
+        // One utterance per press, but it reached its time limit while the press goes on: the
+        // backend starts a new stream (a Google stream may last at most 5 minutes).
+        if (fromFeed && !recorder.splitAtPauses) send(JSON.stringify({ type: 'cut' }))
+      }
+    }
+  }
+
+  async function judge(chunk: ArrayBuffer, n: number): Promise<void> {
+    if (!detector || disposed) return
+    const verdict = await detector.check(chunk)
+    onVerdict({ type: 'verdict', speech: verdict.speech, rms: Math.round(verdict.rms) })
+    done(recorder.feed(chunk, n, verdict.speech), true)
+  }
+
+  function onChunk(chunk: ArrayBuffer): void {
+    if (!talking) return
+    const n = ++chunkNumber
+    if (streaming && !send(chunk)) streaming = false   // the connection broke: this press goes on without text
+    later(() => judge(chunk, n))
+  }
+
+  onStatus('connecting')
+  createSpeechDetector().then(
+    (d) => {
+      detector = d
+      if (!disposed) onStatus('connected')
+    },
+    (err) => onStatus(`unavailable: ${err instanceof Error ? err.message : String(err)}`),
+  )
+
+  // ---------------- with speech-to-text: the backend ----------------
+  let ws: WebSocket | null = null
+  let streaming = false   // this press's audio goes to the backend (it was reachable when the press started)
+  let available = false   // the backend has speech-to-text (its "transcription" message)
+  let settings: TranscriptionSettings | null = null  // sent on every (re)connect
 
   function send(data: string | ArrayBuffer): boolean {
     if (ws?.readyState !== WebSocket.OPEN) return false
@@ -137,16 +185,25 @@ export function createLink({ onStatus = () => {}, onVerdict = () => {}, onUttera
     return true
   }
 
-  // While the server is unreachable, poll it with plain HTTP and only then open the
-  // WebSocket: Firefox slows down repeated failed WebSocket attempts (up to ~1 min).
+  /** Whether pauses end an utterance: not in Live and Per press (where an utterance is a whole
+   *  press), as long as the backend transcribes. */
+  function splitsAtPauses(): boolean {
+    return !(transcription && available && (settings?.mode === 'stream' || settings?.mode === 'press'))
+  }
+
+  // While the backend is unreachable, poll it with plain HTTP and only then open the WebSocket:
+  // Firefox slows down repeated failed WebSocket attempts (up to ~1 min). Only {"ok": true}
+  // counts: a site serving the page may answer unknown paths with a page (status 200).
   async function waitForServer(): Promise<void> {
-    onStatus('connecting')
+    let reported = false
     while (!disposed) {
       try {
-	if ((await fetch(httpUrl('/healthz'), { cache: 'no-store' })).ok) break
-      } catch { /* not up yet */ }
+        const response = await fetch(httpUrl('/healthz'), { cache: 'no-store' })
+        if (response.ok && ((await response.json()) as { ok?: unknown }).ok === true) break
+      } catch { /* not up yet (or not JSON) */ }
       if (disposed) return
-      onStatus('disconnected')
+      if (!reported) onTextError(UNREACHABLE)
+      reported = true
       await new Promise((r) => setTimeout(r, 1000))
     }
     if (!disposed) connect()
@@ -156,46 +213,42 @@ export function createLink({ onStatus = () => {}, onVerdict = () => {}, onUttera
     const socket = new WebSocket(wsUrl('/ws'))
     ws = socket
     socket.binaryType = 'arraybuffer'
-    sentChunks = 0                   // the server counts from 1 again on every new connection
-    kept.clear()
+    let opened = false
     socket.onopen = () => {
-      onStatus('connected')
+      opened = true
+      onTextError('')
       if (settings) send(JSON.stringify({ type: 'settings', ...settings }))
+      // Already listening (e.g. "Dot always on" started before the backend was up, or after a
+      // reconnect): stream from the next chunk on.
+      if (talking) streaming = send(JSON.stringify({ type: 'mic', on: true, chunk: chunkNumber + 1 }))
     }
     socket.onmessage = (msg: MessageEvent<string>) => {
       // JSON.parse returns `any`: this is where we promise TypeScript what the server sends.
       const data = JSON.parse(msg.data) as ServerMessage
-      if (data.type === 'verdict') onVerdict(data)          // here TypeScript knows: data is a Verdict
-      else if (data.type === 'utterance') {                  // ...and here an UtteranceMessage
-        if (data.event === 'ended') {
-          const pcm = assemble(data.first, data.last)
-          const recording = pcm && { pcm, sampleRate: SAMPLE_RATE, seconds: data.seconds }
-          onUtterance({ event: 'ended', key: data.first, seconds: data.seconds, recording })
-        } else if (data.event === 'started') onUtterance({ event: 'started', key: data.first, seconds: data.seconds })
-        else if (data.event === 'discarded') onUtterance({ event: 'discarded', key: data.first })
+      if (data.type === 'text') onText(data)
+      else if (data.type === 'transcription') {
+        available = data.available
+        onTranscription(data.available)
       }
-      else if (data.type === 'text') onText(data)
-      else if (data.type === 'transcription') onTranscription(data.available)
       else if (data.type === 'text_error') onTextError(data.message)
     }
     socket.onclose = () => {
       ws = null
-      talking = false
-      if (!disposed) waitForServer()
+      streaming = false
+      if (disposed) return
+      onTextError(UNREACHABLE)
+      // Refused although /healthz answers (e.g. an origin not in ALLOWED_ORIGINS): don't retry at once.
+      if (opened) void waitForServer()
+      else setTimeout(() => { if (!disposed) void waitForServer() }, 1000)
     }
   }
 
-  // 100 ms chunks of 16-bit PCM, only sent while pressed; numbered and kept for recordings
-  function onChunk(chunk: ArrayBuffer): void {
-    if (!talking || !send(chunk)) return
-    sentChunks += 1
-    kept.set(sentChunks, chunk)
-    kept.delete(sentChunks - KEEP_CHUNKS)  // forget what's older than KEEP_SECONDS
-  }
+  if (transcription) void waitForServer()
 
+  // ---------------- the dot ----------------
   async function press(): Promise<boolean> {
     if (held || disposed) return held
-    if (ws?.readyState !== WebSocket.OPEN) return false
+    if (!detector) return false      // still loading
     held = true
     try {
       await (mic ??= openMicrophone(onChunk))  // first press: asks for permission; afterwards instant
@@ -206,26 +259,45 @@ export function createLink({ onStatus = () => {}, onVerdict = () => {}, onUttera
       return false
     }
     if (!held) return false          // released while the mic was starting
-    talking = send(JSON.stringify({ type: 'mic', on: true }))
-    return talking
+    later(() => {
+      detector?.reset()              // a new press: Silero forgets the last one
+      recorder.splitAtPauses = splitsAtPauses()
+    })
+    streaming = transcription && send(JSON.stringify({ type: 'mic', on: true, chunk: chunkNumber + 1 }))
+    talking = true
+    return true
   }
 
   function release(): void {
     if (!held) return
     held = false
-    if (talking) {
-      talking = false
-      send(JSON.stringify({ type: 'mic', on: false }))
-    }
+    if (!talking) return
+    talking = false
+    // After the chunks still waiting to be judged: the last utterance, then (with speech-to-text)
+    // the end of the press, in that order, so its text isn't lost.
+    later(() => {
+      done(recorder.finish())
+      if (streaming) send(JSON.stringify({ type: 'mic', on: false }))
+      streaming = false
+    })
   }
 
   function cut(): void {
-    if (talking) send(JSON.stringify({ type: 'cut' }))
+    if (!talking) return
+    later(() => {
+      done(recorder.finish())
+      if (streaming) send(JSON.stringify({ type: 'cut' }))
+    })
   }
 
   function configure(next: TranscriptionSettings): void {
     settings = next
-    send(JSON.stringify({ type: 'settings', ...next }))  // if not connected now: on connect
+    // While listening, the current utterance is finished with the old settings first.
+    later(() => {
+      if (talking) done(recorder.finish())
+      recorder.splitAtPauses = splitsAtPauses()
+      send(JSON.stringify({ type: 'settings', ...next }))  // if not connected now: on connect
+    })
   }
 
   function dispose(): void {
@@ -235,6 +307,5 @@ export function createLink({ onStatus = () => {}, onVerdict = () => {}, onUttera
     void mic?.then((m) => m.close(), () => {})
   }
 
-  waitForServer()
   return { press, release, cut, configure, dispose }
 }

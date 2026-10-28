@@ -9,21 +9,21 @@ The goal of the project is a **testbed for AI agents that process voice recordin
 ## Features
 
 - **Push to talk:** hold the dot (mouse, finger or the `R` key) to record; let go to stop.
-- **Live speech detection, in the browser:** every 100 ms of audio is judged on the device by [Silero VAD](https://github.com/snakers4/silero-vad), a small neural network run with ONNX Runtime (WebAssembly); the dot turns a more intense red, glows and moves faster while speech is heard. No server is involved.
+- **Live speech detection, in the browser:** every 100 ms of audio is judged on the device by [Silero VAD](https://github.com/snakers4/silero-vad) (which looks at it in 32 ms frames), a small neural network run with ONNX Runtime (WebAssembly); the dot turns a more intense red, glows and moves faster while speech is heard. No server is involved.
 - **Utterances:** the audio is cut into utterances at pauses (0.7 s of quiet), when you let go, or after 15 s.
 - **Speech bubbles:** each press of the dot gets a speech bubble.
-- **Speech-to-text (optional, off by default):** only in a build with `VITE_SPEECH_TO_TEXT=1`, which also moves speech detection to the backend. This needs more setup, described in [Speech-to-text](#speech-to-text) below.
+- **Speech-to-text (optional, off by default):** only in a build with `VITE_SPEECH_TO_TEXT=1`, which sends the audio to a backend for transcription (speech is still detected in the browser). This needs more setup, described in [Speech-to-text](#speech-to-text) below.
 - **Draggable dot:** pick up the dot while recording and move it around.
 - **Full-screen WebGL:** the dot and bubbles are drawn by a fragment shader, on desktop and mobile.
-- **Private by design:** recordings stay in the browser; by default nothing leaves the device. (With speech-to-text, the backend judges the audio and saves nothing unless debug recording is switched on.)
+- **Private by design:** recordings stay in the browser; by default nothing leaves the device. (With speech-to-text, the audio goes to the backend to be transcribed; it saves nothing unless debug recording is switched on.)
 
 ## Speech-to-text
 
 In a build with `VITE_SPEECH_TO_TEXT=1`, the text of each bubble's utterances appears inside it,
 with the service's confidence. A text longer than the bubble shows its newest words; the mouse
-wheel over the bubble scrolls back. The audio then goes to the backend, which also detects speech
-(instead of the browser), and from there through [RecordingToText](recording-to-text/README.md)
-to a speech-to-text service.
+wheel over the bubble scrolls back. Speech is still detected in the browser; the audio and where each
+utterance starts and ends go to the backend, and from there through
+[RecordingToText](recording-to-text/README.md) to a speech-to-text service.
 
 **What you need:** the backend and RecordingToText running, and your own access to at least one
 paid service (nothing of the kind comes with the repository):
@@ -56,7 +56,7 @@ themselves (in the same bubble). Dragging the dot just moves it.
 flowchart LR
   subgraph browser["Browser (React + WebGL)"]
     mic["Microphone"] --> rec["pcm-recorder.js<br/>AudioWorklet: 16 kHz, 100 ms chunks"]
-    rec --> link["localLink.ts<br/>queue, press / release"]
+    rec --> link["link.ts<br/>queue, press / release"]
     link --> vad["speechDetector.ts<br/>Silero VAD (ONNX Runtime, WebAssembly)"]
     link --> utt["utterances.ts<br/>start / end state machine"]
     link --> dot["RedDot.tsx<br/>state, pointer and keyboard input"]
@@ -69,32 +69,30 @@ flowchart LR
 ### How a recording travels
 
 1. **Recording:** while the dot is held, the AudioWorklet `pcm-recorder.js` turns the microphone into 16 kHz, 16-bit mono PCM and hands over 100 ms chunks (`microphone.ts`).
-2. **Speech detection:** `speechDetector.ts` gives Silero VAD the chunk in 32 ms frames (512 samples, with the end of the previous frame as context) and averages their speech probabilities: at least 0.5 is speech. The **verdict** drives the dot's look.
-3. **Utterances:** a small state machine (`utterances.ts`) turns the verdicts into utterances: 200 ms of speech starts one (plus 300 ms of audio from just before, so the first syllable isn't cut), 700 ms of quiet, letting go or 15 seconds end it. Utterances with less than 300 ms of speech are dropped (a click, a cough).
+2. **Speech detection:** each 100 ms chunk gets one **verdict**, speech or not, which drives the dot's look. Silero VAD only takes 32 ms frames (512 samples), so `speechDetector.ts` cuts the chunk into 3 or 4 of them (the rest is carried over to the next chunk; each frame also gets the end of the previous one as context) and averages their speech probabilities: at least 0.5 is speech.
+3. **Utterances:** a small state machine (`utterances.ts`) turns the verdicts into utterances, counting whole 100 ms chunks: 200 ms of speech (2 chunks) starts one, plus 300 ms (3 chunks) of audio from just before, so the first syllable isn't cut; 700 ms of quiet (7 chunks), letting go or 15 seconds end it. Utterances with less than 300 ms of speech are dropped (a click, a cough). The page numbers the chunks it records (from 1, never starting over), and each utterance is named by its first chunk's number.
 4. **Bubbles:** when an utterance starts, it joins the bubble of the current press (the first one makes the bubble pop up); the bubble grows while it's spoken. When it ends, its audio is kept with the bubble.
 5. **Playback:** tapping a bubble plays its utterances with the Web Audio API.
 
-The chunks are judged one after another (a queue in `localLink.ts`), so verdicts and utterances keep their order although each judgement is asynchronous.
+The chunks are judged one after another (a queue in `link.ts`), so verdicts and utterances keep their order although each judgement is asynchronous.
 
 ### With speech-to-text (`VITE_SPEECH_TO_TEXT=1`)
 
-Then `link.ts` replaces `localLink.ts`: it streams the chunks over a WebSocket to the backend (`redDotServer/`), which detects speech itself (loudness + WebRTC VAD, `speech_check.py`; the same utterance rules in `utterances.py`) and sends the text from RecordingToText back. The backend only sends the **numbers of the chunks** an utterance consists of; the browser assembles the audio from the chunks it kept, so the audio never travels back.
+Speech is still detected in the browser. While a press goes on, `link.ts` also streams its chunks over a WebSocket to the backend (`redDotServer/`) and tells it where each utterance starts and ends; the backend keeps the press's chunks, has them transcribed through RecordingToText (`transcriber.py`), and sends the text back. In Live and Per press, the page doesn't end utterances at pauses: the whole press is one utterance (ended after 280 s at the latest, because a Google stream may last at most 5 minutes).
 
 #### The protocol (WebSocket `/ws`)
 
 | Direction | Message | Meaning |
 |---|---|---|
-| page → server | `{"type": "mic", "on": true \| false}` | the dot was pressed / released |
-| page → server | binary, 3200 bytes | 100 ms of 16 kHz 16-bit mono PCM, only while pressed |
-| server → page | `{"type": "verdict", "speech": bool, "rms": int}` | one per chunk |
-| server → page | `{"type": "utterance", "event": "started", "first": n, "seconds": s}` | speech was heard: an utterance starts with chunk `n` (`s`: its length so far, including the audio from just before) |
-| server → page | `{"type": "utterance", "event": "ended", "first": n, "last": m, "seconds": s}` | an utterance consists of the chunks numbered `first..last` (counted from 1 per connection) |
-| server → page | `{"type": "utterance", "event": "discarded", "first": n}` | the utterance that started with chunk `n` had too little speech (a click, a cough): no `ended` will come |
-| page → server | `{"type": "settings", "mode": "stream" \| "recording" \| "press" \| "off", "service": ..., "model": ..., "language": ... \| null}` | speech-to-text settings; sent on connect and on every change. A change while the dot listens ends the current line (finished with the old settings); the next line uses the new ones |
+| page → server | `{"type": "mic", "on": true, "chunk": n}` | a press starts; the next audio chunk is number `n` (the page's numbering) |
+| page → server | binary, 3200 bytes | 100 ms of 16 kHz 16-bit mono PCM, while the press goes on |
+| page → server | `{"type": "utterance", "event": "ended", "first": n, "last": m}` | the page ended an utterance: transcribe chunks `n..m` |
+| page → server | `{"type": "cut"}` | while listening: start a new stream from here (a click with "Dot always on", the 280 s limit, new settings) |
+| page → server | `{"type": "mic", "on": false}` | the press is over (sent after its last utterance) |
+| page → server | `{"type": "settings", "mode": "stream" \| "recording" \| "press" \| "off", "service": ..., "model": ..., "language": ... \| null}` | speech-to-text settings; sent on connect and on every change. A change while the dot listens ends the current utterance first (finished with the old settings) |
 | server → page | `{"type": "transcription", "available": bool}` | once on connect: whether the backend has RecordingToText |
-| server → page | `{"type": "text", "line": n \| null, "text": ..., "final": bool, "confidence": c \| null}` | the text for the line whose first chunk is `n`, or (`null`) for the line still being spoken; `final: false` while it can change |
+| server → page | `{"type": "text", "line": n \| null, "text": ..., "final": bool, "confidence": c \| null}` | the text for the utterance whose first chunk is `n`, or (`null`) for what is still being said; `final: false` while it can change |
 | server → page | `{"type": "text_error", "message": ...}` | a speech-to-text problem, shown in the settings |
-| page → server | `{"type": "cut"}` | "Dot always on": end the current line here and go on listening into a new one (a click on the dot) |
 
 `GET /healthz` answers `{"ok": true}`; the page polls it while the backend is unreachable before opening the WebSocket (Firefox slows down repeated failed WebSocket attempts).
 
@@ -117,13 +115,10 @@ red-dot/                              the React app (Vite, TypeScript)
     ├── microphone.ts                 microphone -> 100 ms chunks (pcm-recorder.js)
     ├── speechDetector.ts             is this 100 ms chunk speech? Silero VAD in the browser
     ├── utterances.ts                 cuts the stream into utterances
-    ├── localLink.ts                  default: mic, detection and utterances, all in the browser
-    ├── link.ts                       with speech-to-text: WebSocket, chunk store, recordings
-    ├── useVoiceLink.ts               React hook around localLink.ts or link.ts (VITE_SPEECH_TO_TEXT)
+    ├── link.ts                       mic, detection and utterances; with speech-to-text, the WebSocket
+    ├── useVoiceLink.ts               React hook around link.ts (VITE_SPEECH_TO_TEXT)
     └── redDotServer/                 the backend (FastAPI), only for speech-to-text
         ├── server.py                 /healthz and /ws, origin check, logging
-        ├── speech_check.py           is this 100 ms chunk speech?
-        ├── utterances.py             cuts the stream into utterances
         ├── transcriber.py            optional: speech-to-text through RecordingToText, text to the page
         └── requirements.txt
 recording-to-text/                    RecordingToText: one interface to several speech-to-text
@@ -135,7 +130,7 @@ docs/screenshot.png
 
 - **React renders the canvas once; the animation runs outside React.** 60 frames and 10 verdicts per second live in refs, not in React state, so they never cause re-renders.
 - **One shader draws everything.** For each pixel it computes the distance to the dot's (wobbling) edge and to every bubble's cloud (an oval core and its puffs) and trail. The looks are plain numbers in `looks.ts`.
-- **The backend decides, the browser keeps the audio.** Speech detection runs in one place, so every client is judged the same way, while recordings stay on the device.
+- **The browser decides and keeps the audio.** Speech detection runs on the device, with or without speech-to-text, so it behaves the same everywhere; the backend only transcribes.
 - **Only your own page may connect.** CORS covers `/healthz`, an explicit `Origin` check covers the WebSocket (`ALLOWED_ORIGINS`).
 
 ## Running it locally
@@ -189,7 +184,7 @@ cd red-dot/src/components/RedDotCode/redDotServer && RECORDING_TO_TEXT_URL=http:
 cd red-dot && VITE_SPEECH_TO_TEXT=1 npm run dev
 ```
 
-Open **http://localhost:5173**. Use `localhost`, not `127.0.0.1`: the backend only accepts the origins listed in `ALLOWED_ORIGINS`. The backend's terminal shows one log line per 100 ms chunk while you talk, every utterance (locally also saved as a WAV file in `debug-audio/`, see [Configuration](#configuration)), and the text, in lines starting with `>>>`. Choose mode, service and language with the settings button in the bottom right corner (default: Live, Google long, German); the text appears inside the bubbles.
+Open **http://localhost:5173**. Use `localhost`, not `127.0.0.1`: the backend only accepts the origins listed in `ALLOWED_ORIGINS`. The backend's terminal shows each press and utterance (locally also saved as a WAV file in `debug-audio/`, see [Configuration](#configuration)), and the text, in lines starting with `>>>`. Choose mode, service and language with the settings button in the bottom right corner (default: Live, Google long, German); the text appears inside the bubbles.
 
 There are no automated tests yet. `npm run build` type-checks the frontend (`tsc -b`) before building, and `npm run lint` runs the linter.
 
@@ -201,8 +196,6 @@ There are no automated tests yet. `npm run build` type-checks the frontend (`tsc
 |---|---|---|
 | `ALLOWED_ORIGINS` | `http://localhost:5173` | comma-separated list of origins whose pages may connect, e.g. `https://example.com` |
 | `DEBUG_AUDIO_DIR` | `debug-audio` | where every utterance is saved as a WAV file; **empty: save nothing** (use that in production) |
-| `VAD_MIN_RMS` | `200` | how loud a chunk must be to count as speech (16-bit scale; speech is typically 1000–5000) |
-| `VAD_MODE` | `3` | WebRTC VAD strictness, 0 (lenient) to 3 (strictest) |
 | `RECORDING_TO_TEXT_URL` | – (off) | where RecordingToText runs, e.g. `http://localhost:8092`; empty: no speech-to-text. Service, model and language are chosen on the page |
 
 **Frontend** (build time, in `red-dot/.env.production`; for development in `red-dot/.env.local`, which git ignores, or in front of the command, e.g. `VITE_UI_LANGUAGE=de npm run dev`). Vite writes the values into the built page; they can't be changed in the page itself.
@@ -211,7 +204,7 @@ There are no automated tests yet. `npm run build` type-checks the frontend (`tsc
 |---|---|---|
 | `VITE_BACKEND_URL` | – (the page's own address) | the backend's public address, e.g. `https://api.example.com`. Leave it unset for development: Vite's proxy forwards `/ws` and `/healthz` to `localhost:8090` |
 | `VITE_UI_LANGUAGE` | `en` | the settings menu's language: `de` for German, otherwise English (`uiText.ts` has the texts) |
-| `VITE_SPEECH_TO_TEXT` | – (off) | `1`: speech-to-text, with the settings menu; the audio goes to the backend, which also detects speech. Off: everything stays in the browser, no backend |
+| `VITE_SPEECH_TO_TEXT` | – (off) | `1`: speech-to-text, with the settings menu; the audio goes to the backend to be transcribed (speech is still detected in the browser). Off: everything stays in the browser, no backend |
 
 ## Deployment
 
@@ -226,7 +219,7 @@ The frontend is a static site; the backend is a small Python service behind a re
 
    ```ini
    [Unit]
-   Description=RedDot speech detector
+   Description=RedDot speech-to-text backend
    After=network.target
 
    [Service]
@@ -285,22 +278,21 @@ The frontend is a static site; the backend is a small Python service behind a re
 
 | Symptom | Likely cause |
 |---|---|
-| The dot stays grey | backend not running; page origin not in `ALLOWED_ORIGINS` (backend log: `refused a WebSocket from ...`); right after a backend restart, wait a few seconds |
+| The dot stays grey | the speech detector couldn't load: the `.wasm` and `.onnx` files aren't served (`.wasm` needs the type `application/wasm`) |
+| Bubbles, but no text; the settings say the backend can't be reached | backend not running; page origin not in `ALLOWED_ORIGINS` (backend log: `refused a WebSocket from ...`); right after a backend restart, wait a few seconds |
 | WebSocket fails with HTTP 426 | the reverse proxy doesn't pass the upgrade: `proxy_http_version 1.1` and the `Upgrade` / `Connection` headers are missing |
 | The connection drops every 60 s | the reverse proxy's read timeout is too short |
 | "Could not start the microphone" | the page isn't served over HTTPS (or `localhost`), or microphone access was denied |
-| No bubble while speaking, only once you let go | the backend is an older version that doesn't send `utterance started` |
 
 ## Roadmap
 
 - **Agents behind one interface** (in progress: [RecordingToText](recording-to-text/README.md) does this for speech-to-text). Every finished utterance is a self-contained recording. The next step is a small interface for "processors" that take a recording and return a result (a transcript, a reply, an action), so that different speech-to-text engines (e.g. Google Cloud Speech-to-Text, Gemini, Whisper) and agents built on them can be plugged in and swapped without touching the UI.
 - **Side-by-side comparison.** Send the same utterance to several processors at once and show their results, timings and confidence next to its bubble.
-- **Speech detection in the browser.** Running voice activity detection locally (e.g. Silero VAD in WebAssembly) would make the dot react instantly and keep audio on the device, with the backend only needed for the agents.
 - **Persistence.** Bubbles currently live in the page and disappear on reload.
 
 ## Privacy
 
-Recordings stay in the browser's memory and are gone when the page is closed. The backend receives the audio only to judge it chunk by chunk; it doesn't store it unless `DEBUG_AUDIO_DIR` is set, which is the default for local development only. Set `DEBUG_AUDIO_DIR=` (empty) on any server other people use.
+Recordings stay in the browser's memory and are gone when the page is closed. Without speech-to-text, nothing leaves the device. With it, the backend receives the audio only to have it transcribed; it doesn't store it unless `DEBUG_AUDIO_DIR` is set, which is the default for local development only. Set `DEBUG_AUDIO_DIR=` (empty) on any server other people use.
 
 With `RECORDING_TO_TEXT_URL` set and speech-to-text on in the page's settings, the audio of each press also goes to RecordingToText, and from
 there to the chosen speech-to-text service (Google Cloud or OpenAI), which processes it under its

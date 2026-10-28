@@ -1,41 +1,29 @@
-"""The backend for the React orb (../orb-react): nothing else.
+"""The red dot's backend, only for speech-to-text: it gets the page's audio and utterances and has
+them transcribed through RecordingToText (transcriber.py).
 
-The browser streams the microphone while the dot (or R) is held; for every 100 ms chunk
-the server answers whether it is speech. For debugging, it also cuts the stream into
-utterances (utterances.py) and saves each as a WAV file in DEBUG_AUDIO_DIR.
+The page detects speech and cuts it into utterances itself, in the browser (link.ts). While the dot
+(or R) is held, it streams the audio here and says where each utterance starts and ends; this
+server keeps the press's chunks, gives the transcriber what it needs (the stream, or an
+utterance's recording), and passes the text back. For debugging, each utterance is also saved as
+a WAV file in DEBUG_AUDIO_DIR.
 
-Speech-to-text is optional and separate: with RECORDING_TO_TEXT_URL set, the audio also goes to
-RecordingToText, as the page's settings say, and the text comes back to the page for its lines
-(transcriber.py).
-
-Run:   .venv/bin/uvicorn server:app --port 8090
-       RECORDING_TO_TEXT_URL=http://localhost:8092 .venv/bin/uvicorn server:app --port 8090
-       (the port the React dev server forwards to: see ../orb-react/vite.config.ts)
+Run:   RECORDING_TO_TEXT_URL=http://localhost:8092 .venv/bin/uvicorn server:app --port 8090
+       (the port the page's dev server forwards to: see red-dot/vite.config.ts)
 
 HTTP:
-    GET /healthz                  the page polls this while the server is down
-    GET /static/pcm-recorder.js   the AudioWorklet that turns the mic into 100 ms PCM chunks
+    GET /healthz                  {"ok": true}; the page polls this while the server is down
 WebSocket /ws:
-    page -> server  text   {"type": "mic", "on": true|false}   dot/R pressed or released
-                    binary 100 ms of 16 kHz 16-bit mono PCM   only while pressed
+    page -> server  text   {"type": "mic", "on": true, "chunk": n}   a press starts; the next audio
+                           chunk is number n (the page's numbering, which never starts over)
+                    binary 100 ms of 16 kHz 16-bit mono PCM   while the press goes on
+                    text   {"type": "utterance", "event": "ended", "first": n, "last": m}
+                           the page ended an utterance: chunks n..m
+                    text   {"type": "cut"}   while listening: start a new stream from here (a click
+                           with "Dot always on", the 280 s limit of one utterance, new settings)
+                    text   {"type": "mic", "on": false}   the press is over (after its last utterance)
                     text   {"type": "settings", "mode": ..., "service": ..., "model": ..., "language": ...}
-                           how to transcribe (see transcriber.py); while listening, a change ends the
-                           current line and the next one uses the new settings
-                    text   {"type": "cut"}   while listening: end the current line here and go on
-                           with a new one (live speech-to-text, where the page listens all the time
-                           and a click on the dot starts a new line)
-    server -> page  text   {"type": "verdict", "speech": bool, "rms": int}   one per chunk
-                    text   {"type": "utterance", "event": "started", "first": n, "seconds": s}
-                           speech was heard: an utterance starts with chunk n (s: its length so far,
-                           including the audio kept from just before)
-                    text   {"type": "utterance", "event": "ended", "first": n, "last": m, "seconds": s}
-                           an utterance is complete: it consists of the chunks numbered first..last
-                           (counted from 1 per connection, in the order the page sent them). The page
-                           kept those chunks itself, so the audio doesn't travel back.
-                    text   {"type": "utterance", "event": "discarded", "first": n}
-                           the utterance that started with chunk n had too little speech (a click,
-                           a cough): there won't be an "ended" for it
-                    text   {"type": "transcription", ...}, {"type": "text", ...}, {"type": "text_error", ...}
+                           how to transcribe (see transcriber.py)
+    server -> page  text   {"type": "transcription", ...}, {"type": "text", ...}, {"type": "text_error", ...}
                            speech-to-text, see transcriber.py
 """
 
@@ -52,19 +40,21 @@ from pathlib import Path
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
-from speech_check import MIN_RMS, SAMPLE_RATE, ChunkCheck, SpeechCheck
 from transcriber import Transcriber
-from utterances import PRESS_MAX_SECONDS, UtteranceEvent, UtteranceRecorder
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s.%(msecs)03d  %(message)s", datefmt="%H:%M:%S")
-log = logging.getLogger("orb-server")
+log = logging.getLogger("red-dot-server")
 
-# Every finished utterance is saved here as a WAV file you can listen to. Empty: don't save.
+SAMPLE_RATE = 16000
+CHUNK_SECONDS = 0.1
+KEEP_CHUNKS = 3000   # a press's chunks are kept for its utterances' recordings: at most 5 minutes
+
+# Every utterance is saved here as a WAV file you can listen to. Empty: don't save.
 DEBUG_AUDIO_DIR = os.getenv("DEBUG_AUDIO_DIR", "debug-audio")
 
 ALLOWED_ORIGINS = [o.strip().rstrip("/") for o in os.getenv("ALLOWED_ORIGINS", "http://localhost:5173").split(",") if o.strip()]
 
-app = FastAPI(title="Orb backend")
+app = FastAPI(title="Red dot backend")
 # CORS: lets pages from ALLOWED_ORIGINS read /healthz although they come from another domain.
 app.add_middleware(CORSMiddleware, allow_origins=ALLOWED_ORIGINS, allow_methods=["GET"])
 
@@ -72,14 +62,6 @@ app.add_middleware(CORSMiddleware, allow_origins=ALLOWED_ORIGINS, allow_methods=
 @app.get("/healthz")
 async def healthz() -> dict:
     return {"ok": True}
-
-
-def describe(n: int, c: ChunkCheck, recorder: UtteranceRecorder) -> str:
-    """One log line per chunk: the two checks, the verdict, and whether a sentence is being recorded."""
-    loud = f"rms {c.rms:5.0f} {'>=' if c.rms >= MIN_RMS else '< '} {MIN_RMS:.0f}"
-    voice = f"voice {c.voiced_frames}/{c.total_frames}"
-    state = "RECORDING" if recorder.recording else "waiting"
-    return f"#{n:05d}  {loud}   {voice}   -> {'SPEECH' if c.is_speech else 'quiet '}   {state}"
 
 
 def save_wav(pcm: bytes) -> Path:
@@ -91,13 +73,6 @@ def save_wav(pcm: bytes) -> Path:
         w.setframerate(SAMPLE_RATE)
         w.writeframes(pcm)
     return path
-
-
-def report(ev: UtteranceEvent, why: str = "") -> None:
-    if ev.event == "ended" and ev.audio and DEBUG_AUDIO_DIR:
-        log.info("=== utterance ended%s (%.1f s) -> saved %s ===", why, ev.seconds, save_wav(ev.audio))
-    else:
-        log.info("=== utterance %s%s (%.1f s) ===", ev.event, why, ev.seconds)
 
 
 @app.websocket("/ws")
@@ -113,7 +88,7 @@ async def ws_endpoint(websocket: WebSocket) -> None:
 
     await websocket.accept()
     log.info("page connected")
-    send_lock = asyncio.Lock()  # verdicts come from here, text from the transcriber's own task
+    send_lock = asyncio.Lock()  # text comes from the transcriber's own tasks, possibly several at once
 
     async def send(message: dict) -> None:
         try:
@@ -124,37 +99,24 @@ async def ws_endpoint(websocket: WebSocket) -> None:
 
     transcriber = Transcriber(send)
     await send({"type": "transcription", "available": Transcriber.available()})
-    speech_check = SpeechCheck()
-    recorder = UtteranceRecorder()
-    talking = False  # the dot (or R) is held, or the page listens all the time (live speech-to-text)
-    chunks = 0       # chunks received while talking; the page counts the ones it sends the same way
-    press_start = 0  # chunks received before the current press (or since the last cut)
+    talking = False                  # a press goes on: its audio arrives
+    chunk = 0                        # the last chunk's number, as the page counts them
+    kept: dict[int, bytes] = {}      # this press's chunks, by number
 
-    async def utterance_done(ev: UtteranceEvent, why: str = "") -> None:
-        report(ev, why)
-        # The utterance is the last ev.chunks chunks received, up to and including this one.
-        first = chunks - ev.chunks + 1
-        if ev.event == "started":
-            await send({"type": "utterance", "event": "started", "first": first, "seconds": round(ev.seconds, 1)})
-        elif ev.event == "discarded":
-            await send({"type": "utterance", "event": "discarded", "first": first})
-        elif ev.event == "ended":
-            await send({"type": "utterance", "event": "ended", "first": first, "last": chunks,
-                        "seconds": round(ev.seconds, 1)})
-            await transcriber.utterance(first, chunks, ev.audio)
+    async def utterance_ended(first: int, last: int) -> None:
+        audio = b"".join(kept.get(n, b"") for n in range(first, last + 1))
+        seconds = (last - first + 1) * CHUNK_SECONDS
+        if DEBUG_AUDIO_DIR and audio:
+            log.info("=== utterance %d..%d (%.1f s) -> saved %s ===", first, last, seconds, save_wav(audio))
+        else:
+            log.info("=== utterance %d..%d (%.1f s) ===", first, last, seconds)
+        await transcriber.utterance(first, last, audio)
 
-    async def cut(why: str, settings: dict | None = None) -> None:
-        """End the current line here and go on listening into a new one (and a new stream). With
-        new settings: the current line is finished with the old ones, the new line uses these."""
-        nonlocal press_start
-        if ev := recorder.finish():
-            await utterance_done(ev, why)
+    async def new_stream(why: str) -> None:
+        """End the transcriber's current stream here and start the next one (mode 1)."""
+        log.info("=== new stream%s ===", why)
         await transcriber.stop()
-        if settings is not None:
-            transcriber.configure(settings)
-            recorder.split_at_pauses = transcriber.splits_at_pauses()
-        await transcriber.start(chunks)
-        press_start = chunks
+        await transcriber.start(chunk)
 
     try:
         while True:
@@ -163,38 +125,36 @@ async def ws_endpoint(websocket: WebSocket) -> None:
                 return
             if msg.get("text"):
                 data = json.loads(msg["text"])
-                if data.get("type") == "settings":
+                kind = data.get("type")
+                if kind == "settings":
                     if talking and transcriber.would_change(data):
-                        await cut(" because the settings changed", data)
+                        await transcriber.stop()       # the page has ended the utterance with the old settings
+                        transcriber.configure(data)
+                        await transcriber.start(chunk)
                     else:
                         transcriber.configure(data)
-                elif data.get("type") == "cut" and talking:
-                    await cut(" because the dot was clicked")
-                elif data.get("type") == "mic" and bool(data.get("on")) != talking:
+                elif kind == "mic" and bool(data.get("on")) != talking:
                     talking = bool(data.get("on"))
-                    press_start = chunks
-                    if talking:  # live and per-press speech-to-text: everything said during this press is one line
-                        recorder.split_at_pauses = transcriber.splits_at_pauses()
-                    if not talking and (ev := recorder.finish()):
-                        await utterance_done(ev, " because the dot/R was released")
-                    log.info("=== %s ===", "talking" if talking else "not talking")
-                    await (transcriber.start(chunks) if talking else transcriber.stop())
+                    if talking:
+                        chunk = int(data.get("chunk", chunk + 1)) - 1
+                        kept.clear()
+                        log.info("=== talking (from chunk %d) ===", chunk + 1)
+                        await transcriber.start(chunk)
+                    else:
+                        log.info("=== not talking ===")
+                        await transcriber.stop()
+                        kept.clear()
+                elif kind == "utterance" and data.get("event") == "ended":
+                    await utterance_ended(int(data["first"]), int(data["last"]))
+                elif kind == "cut" and talking:
+                    await new_stream(" (the page asked for it)")
             elif msg.get("bytes") and talking:
-                chunks += 1
+                chunk += 1
+                kept[chunk] = msg["bytes"]
+                kept.pop(chunk - KEEP_CHUNKS, None)
                 await transcriber.chunk(msg["bytes"])
-                c = speech_check.check(msg["bytes"])
-                ev = recorder.feed(msg["bytes"], c.is_speech)
-                log.info(describe(chunks, c, recorder))
-                await send({"type": "verdict", "speech": c.is_speech, "rms": round(c.rms)})
-                if ev:
-                    await utterance_done(ev)
-                # Listening without pauses for a new line: a stream may last at most 5 minutes.
-                if not recorder.split_at_pauses and (chunks - press_start) * 0.1 >= PRESS_MAX_SECONDS:
-                    await cut(f" after {PRESS_MAX_SECONDS} s (the longest a stream may last)")
     except WebSocketDisconnect:
         pass
     finally:
-        if ev := recorder.finish():  # the page went away mid-sentence: keep what was said
-            report(ev, " because the page disconnected")
         await transcriber.close()
         log.info("page disconnected")

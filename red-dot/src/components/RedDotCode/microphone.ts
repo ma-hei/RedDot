@@ -1,5 +1,4 @@
-// The microphone as 100 ms chunks of 16 kHz 16-bit mono PCM. No React. Used by both links:
-// link.ts (speech detection on the server) and localLink.ts (in the browser).
+// The microphone as 100 ms chunks of 16 kHz 16-bit mono PCM. No React. Used by link.ts.
 //
 //   const mic = await openMicrophone((chunk) => ...)   // asks for permission; throws if refused
 //   mic.close()

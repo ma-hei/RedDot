@@ -13,7 +13,7 @@ Only active when RECORDING_TO_TEXT_URL is set, e.g. http://localhost:8092. The p
                       this way (its limit for a single recording).
     mode "off"        nothing is sent.
 
-In modes 1 and 3 one press is one line: server.py tells the utterance cutter not to split at pauses.
+In modes 1 and 3 one press is one line: the page (link.ts, utterances.ts) doesn't split it at pauses.
 
 To the page (see link.ts):
     {"type": "transcription", "available": bool}        once, when the page connects
@@ -113,18 +113,13 @@ class Transcriber:
         return bool(BASE_URL)
 
     def configure(self, data: dict) -> None:
-        """New settings from the page. While listening, server.py first ends the current line (with
-        the old settings) and then starts a new one with these."""
+        """New settings from the page. While listening, the page first ends the current line (with
+        the old settings); server.py then starts a new stream with these."""
         self.settings = Settings.from_page(data)
         log.info(">>> settings: %s", self.settings)
 
     def would_change(self, data: dict) -> bool:
         return Settings.from_page(data) != self.settings
-
-    def splits_at_pauses(self) -> bool:
-        """Whether pauses end a line: not in Live and Per press, where a line is a whole press
-        (or, with the dot always on, lasts until a click)."""
-        return self.settings.mode not in ("stream", "press") or not BASE_URL
 
     # ---------------- the dot ----------------
     async def start(self, chunks_so_far: int) -> None:

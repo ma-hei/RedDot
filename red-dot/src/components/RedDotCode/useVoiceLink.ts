@@ -1,11 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { createLink, type Link, type LinkCallbacks, type LinkStatus, type TranscriptionSettings } from './link.ts'
-import { createLocalLink } from './localLink.ts'
 import { SPEECH_TO_TEXT } from './settings.ts'
 
-// Without speech-to-text (the default), everything happens in the browser (localLink.ts); with it,
-// the audio goes to the server, which also detects speech (link.ts). See settings.ts.
-const createVoiceLink = SPEECH_TO_TEXT ? createLink : createLocalLink
+// Speech is always detected in the browser (link.ts); with speech-to-text (VITE_SPEECH_TO_TEXT=1,
+// see settings.ts), the audio and the utterances also go to the backend, which transcribes them.
 
 type Handlers = Pick<LinkCallbacks, 'onVerdict' | 'onUtterance' | 'onText' | 'onTranscription' | 'onTextError'>
 
@@ -29,7 +27,8 @@ export function useVoiceLink(callbacks: Handlers = {}): VoiceLink {
   })
 
   useEffect(() => {
-    const link = createVoiceLink({
+    const link = createLink({
+      transcription: SPEECH_TO_TEXT,
       onStatus: setStatus,
       onVerdict: (v) => handlers.current.onVerdict?.(v),
       onUtterance: (u) => handlers.current.onUtterance?.(u),
