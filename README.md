@@ -11,11 +11,44 @@ The goal of the project is a **testbed for AI agents that process voice recordin
 - **Push to talk:** hold the dot (mouse, finger or the `R` key) to record; let go to stop.
 - **Live speech detection, in the browser:** every 100 ms of audio is judged on the device by [Silero VAD](https://github.com/snakers4/silero-vad), a small neural network run with ONNX Runtime (WebAssembly); the dot turns a more intense red, glows and moves faster while speech is heard. No server is involved.
 - **Utterances:** the audio is cut into utterances at pauses (0.7 s of quiet), when you let go, or after 15 s.
-- **Speech bubbles:** each press of the dot gets a speech bubble: a cloud of round puffs that looks like white plastic (gray only along its outer edge), with a trail of small puffs (its tail). It pops up when the first utterance starts: above the dot, a little to the right or left, if there's room; only if older bubbles (or the screen's edge) take up the space above, below the dot. It grows with the seconds of speech it holds (all the utterances of that press) up to a full size (20 s). While the press goes on, it moves with the dot and its tail points at the dot; when you let go, it stays where it is and its tail keeps its direction. Tap it to play its utterances one after the other (it pulsates while it plays), drag it to arrange your bubbles, or drop it on the **bin** at the bottom of the screen to remove it (with its text).
-- **Speech-to-text (optional, off by default):** only in a build with `VITE_SPEECH_TO_TEXT=1`, which also moves speech detection to the backend. Then the text of a bubble's utterances appears inside it, with the service's confidence; a text longer than the bubble shows its newest words, and the mouse wheel over the bubble scrolls back. **Per utterance** (mode 2): each pause ends an utterance, and its audio is sent right then; its text follows 1–2 s later. **Live** (mode 1): everything said during one press is one utterance; your words appear with the bubble and are revised as you go, and settle when you let go. **Dot always on** (an option for these two): the dot listens all the time, no holding (but not while the tab is hidden); **click the dot** (or press `R`) to end the current bubble there, and listening goes on into the next one. With Per utterance, pauses still end utterances by themselves (in the same bubble). Dragging the dot just moves it. **Per press** (mode 3): like Live, the whole press is one utterance, but nothing is sent while you hold the dot; when you let go, the press goes as one recording (Google: up to 1 minute). Service (Google long, Google chirp_2, Whisper) and language (German, English, detect) are chosen with the small settings button in the corner; it goes through [RecordingToText](recording-to-text/README.md).
+- **Speech bubbles:** each press of the dot gets a speech bubble.
+- **Speech-to-text (optional, off by default):** only in a build with `VITE_SPEECH_TO_TEXT=1`, which also moves speech detection to the backend. This needs more setup, described in [Speech-to-text](#speech-to-text) below.
 - **Draggable dot:** pick up the dot while recording and move it around.
 - **Full-screen WebGL:** the dot and bubbles are drawn by a fragment shader, on desktop and mobile.
 - **Private by design:** recordings stay in the browser; by default nothing leaves the device. (With speech-to-text, the backend judges the audio and saves nothing unless debug recording is switched on.)
+
+## Speech-to-text
+
+In a build with `VITE_SPEECH_TO_TEXT=1`, the text of each bubble's utterances appears inside it,
+with the service's confidence. A text longer than the bubble shows its newest words; the mouse
+wheel over the bubble scrolls back. The audio then goes to the backend, which also detects speech
+(instead of the browser), and from there through [RecordingToText](recording-to-text/README.md)
+to a speech-to-text service.
+
+**What you need:** the backend and RecordingToText running, and your own access to at least one
+paid service (nothing of the kind comes with the repository):
+
+| Service | Modes | Setup |
+|---|---|---|
+| Google Cloud Speech-to-Text (`long`, `chirp_2`) | all three | a Google Cloud project with billing: [recording-to-text/docs/setup.md](recording-to-text/docs/setup.md) |
+| Whisper (OpenAI API) | Per utterance, Per press | an OpenAI API key: the same guide |
+
+How to start everything: [Optional: speech-to-text](#optional-speech-to-text) under "Running it locally".
+
+**Settings:** the small button in the bottom right corner opens them: the mode, the service
+(Google long, Google chirp_2, Whisper) and the language (German, English, or detect). The page
+starts with Live, Google long and German; with Whisper only, choose Whisper and Per utterance.
+
+| Mode | What happens |
+|---|---|
+| **Per utterance** (mode 2) | each pause ends an utterance, and its audio is sent right then; its text follows 1–2 s later |
+| **Live** (mode 1) | everything said during one press is one utterance; your words appear in the bubble as you speak, are revised as you go, and settle when you let go |
+| **Per press** (mode 3) | like Live, the whole press is one utterance, but nothing is sent while you hold the dot; when you let go, the press goes as one recording (Google: up to 1 minute) |
+
+**Dot always on** (an option for Per utterance and Live): the dot listens all the time, no
+holding (but not while the tab is hidden). Click the dot (or press `R`) to end the current bubble
+there; listening goes on into the next one. With Per utterance, pauses still end utterances by
+themselves (in the same bubble). Dragging the dot just moves it.
 
 ## Architecture
 
@@ -128,7 +161,7 @@ Open **http://localhost:5173**. That's all: by default the page needs no backend
 
 ### Optional: speech-to-text
 
-This needs the backend, and the page started (or built) with `VITE_SPEECH_TO_TEXT=1`; the backend then also detects speech. The text itself comes from paid services, so you need your own access to at least one: a Google Cloud project with Speech-to-Text (every mode), or an OpenAI API key for Whisper (Per utterance and Per press). Nothing of the kind comes with the repository; set it up once with [recording-to-text/docs/setup.md](recording-to-text/docs/setup.md). With Whisper only, choose **Whisper** and **Per utterance** in the settings: the page starts with Google and Live.
+This needs the backend, RecordingToText, and your own Google project or OpenAI key (set up once: see [Speech-to-text](#speech-to-text) above).
 
 Install the backend once:
 
