@@ -128,13 +128,21 @@ Open **http://localhost:5173**. That's all: by default the page needs no backend
 
 ### Optional: speech-to-text
 
-This needs the backend, and the page started (or built) with `VITE_SPEECH_TO_TEXT=1`; the backend then also detects speech. Install the backend once:
+This needs the backend, and the page started (or built) with `VITE_SPEECH_TO_TEXT=1`; the backend then also detects speech. The text itself comes from paid services, so you need your own access to at least one: a Google Cloud project with Speech-to-Text (every mode), or an OpenAI API key for Whisper (Per utterance and Per press). Nothing of the kind comes with the repository; set it up once with [recording-to-text/docs/setup.md](recording-to-text/docs/setup.md). With Whisper only, choose **Whisper** and **Per utterance** in the settings: the page starts with Google and Live.
+
+Install the backend once:
 
 ```bash
 cd red-dot/src/components/RedDotCode/redDotServer && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 ```
 
-Start RecordingToText (setup in [recording-to-text/README.md](recording-to-text/README.md)), the backend and the page, each in its own terminal:
+and RecordingToText (its [README](recording-to-text/README.md) has more):
+
+```bash
+cd recording-to-text && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+```
+
+Then start RecordingToText, the backend and the page, each in its own terminal:
 
 ```bash
 cd recording-to-text && .venv/bin/uvicorn recording_to_text.server:app --port 8092
