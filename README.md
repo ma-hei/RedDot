@@ -1,6 +1,6 @@
 # RedDot
 
-![RedDot: the red dot with four recorded utterances around it](docs/screenshot.png)
+![RedDot: the red dot with four speech bubbles (clouds) around it](docs/screenshot.png)
 
 **RedDot is a frontend for voice input.** Hold the red dot and speak: the dot reacts while it hears speech, and a speech bubble (a cloud) pops up above it and grows while you talk, a trail of small puffs pointing at the dot. Tap a bubble to hear what you said again, drag bubbles and the dot around the screen.
 
