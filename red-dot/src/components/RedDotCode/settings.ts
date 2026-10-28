@@ -4,6 +4,10 @@
 import type { TranscriptionSettings } from './link.ts'
 import { TEXT } from './uiText.ts'
 
+// Speech-to-text is hidden for now: only a build with VITE_SPEECH_TO_TEXT=1 has the ⚙ panel and
+// sends audio to the server (link.ts). Without it, the audio stays in the browser (localLink.ts).
+export const SPEECH_TO_TEXT = import.meta.env.VITE_SPEECH_TO_TEXT === '1'
+
 export type Mode = TranscriptionSettings['mode']
 
 export interface Engine {

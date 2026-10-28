@@ -6,7 +6,7 @@ import { LOOKS, advance, createOrbState } from './looks.ts'
 import type { Look, LookName, OrbState } from './looks.ts'
 import type { LinkStatus } from './link.ts'
 import SettingsPanel from './SettingsPanel.tsx'
-import { alwaysOnAllowed, loadChoice, saveChoice, toSettings } from './settings.ts'
+import { SPEECH_TO_TEXT, alwaysOnAllowed, loadChoice, saveChoice, toSettings } from './settings.ts'
 import type { Choice } from './settings.ts'
 import { createOrbRenderer as createSdfRenderer } from './renderer.ts'
 import { createOrbRenderer as createMeshRenderer } from './rendererMesh.ts'
@@ -419,7 +419,9 @@ export default function RedDot({ onStatusChange }: RedDotProps) {
               				strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
       			</svg>
     		</div>
-    		<SettingsPanel choice={choice} onChange={changeChoice} available={available} error={available === false ? null : textError} />
+    		{SPEECH_TO_TEXT && (
+      			<SettingsPanel choice={choice} onChange={changeChoice} available={available} error={available === false ? null : textError} />
+    		)}
     		</div>
   	)
 };

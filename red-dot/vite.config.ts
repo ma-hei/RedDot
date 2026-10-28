@@ -8,6 +8,9 @@ const BACKEND = 'http://localhost:8090'
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react()],
+  // ONNX Runtime (speechDetector.ts) finds its WebAssembly file next to its own script; Vite's
+  // dependency pre-bundling would move the script away from it.
+  optimizeDeps: { exclude: ['onnxruntime-web'] },
   server: {
     // The page comes from Vite (port 5173) and calls "/ws" and "/healthz" on its own address;
     // these are forwarded to the backend. Without this, Vite would answer /healthz with the

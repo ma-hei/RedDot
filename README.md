@@ -9,13 +9,13 @@ The goal of the project is a **testbed for AI agents that process voice recordin
 ## Features
 
 - **Push to talk:** hold the dot (mouse, finger or the `R` key) to record; let go to stop.
-- **Live speech detection:** a backend judges every 100 ms of audio (loudness + WebRTC voice activity detection); the dot turns a more intense red, glows and moves faster while speech is heard.
+- **Live speech detection, in the browser:** every 100 ms of audio is judged on the device by [Silero VAD](https://github.com/snakers4/silero-vad), a small neural network run with ONNX Runtime (WebAssembly); the dot turns a more intense red, glows and moves faster while speech is heard. No server is involved.
 - **Utterances:** the audio is cut into utterances at pauses (0.7 s of quiet), when you let go, or after 15 s.
 - **Speech bubbles:** each press of the dot gets a speech bubble: a cloud of round puffs that looks like white plastic (gray only along its outer edge), with a trail of small puffs (its tail). It pops up when the first utterance starts: above the dot, a little to the right or left, if there's room; only if older bubbles (or the screen's edge) take up the space above, below the dot. It grows with the seconds of speech it holds (all the utterances of that press) up to a full size (20 s). While the press goes on, it moves with the dot and its tail points at the dot; when you let go, it stays where it is and its tail keeps its direction. Tap it to play its utterances one after the other (it pulsates while it plays), drag it to arrange your bubbles, or drop it on the **bin** at the bottom of the screen to remove it (with its text).
-- **Speech-to-text (optional):** the text of a bubble's utterances appears inside it, with the service's confidence; a text longer than the bubble shows its newest words, and the mouse wheel over the bubble scrolls back. **Per utterance** (mode 2): each pause ends an utterance, and its audio is sent right then; its text follows 1–2 s later. **Live** (mode 1): everything said during one press is one utterance; your words appear with the bubble and are revised as you go, and settle when you let go. **Dot always on** (an option for these two): the dot listens all the time, no holding (but not while the tab is hidden); **click the dot** (or press `R`) to end the current bubble there, and listening goes on into the next one. With Per utterance, pauses still end utterances by themselves (in the same bubble). Dragging the dot just moves it. **Per press** (mode 3): like Live, the whole press is one utterance, but nothing is sent while you hold the dot; when you let go, the press goes as one recording (Google: up to 1 minute). Service (Google long, Google chirp_2, Whisper) and language (German, English, detect) are chosen with the small settings button in the corner; it goes through [RecordingToText](recording-to-text/README.md).
+- **Speech-to-text (optional, off by default):** only in a build with `VITE_SPEECH_TO_TEXT=1`, which also moves speech detection to the backend. Then the text of a bubble's utterances appears inside it, with the service's confidence; a text longer than the bubble shows its newest words, and the mouse wheel over the bubble scrolls back. **Per utterance** (mode 2): each pause ends an utterance, and its audio is sent right then; its text follows 1–2 s later. **Live** (mode 1): everything said during one press is one utterance; your words appear with the bubble and are revised as you go, and settle when you let go. **Dot always on** (an option for these two): the dot listens all the time, no holding (but not while the tab is hidden); **click the dot** (or press `R`) to end the current bubble there, and listening goes on into the next one. With Per utterance, pauses still end utterances by themselves (in the same bubble). Dragging the dot just moves it. **Per press** (mode 3): like Live, the whole press is one utterance, but nothing is sent while you hold the dot; when you let go, the press goes as one recording (Google: up to 1 minute). Service (Google long, Google chirp_2, Whisper) and language (German, English, detect) are chosen with the small settings button in the corner; it goes through [RecordingToText](recording-to-text/README.md).
 - **Draggable dot:** pick up the dot while recording and move it around.
 - **Full-screen WebGL:** the dot and bubbles are drawn by a fragment shader, on desktop and mobile.
-- **Private by design:** recordings stay in the browser. The backend only judges the audio, and saves nothing unless debug recording is switched on.
+- **Private by design:** recordings stay in the browser; by default nothing leaves the device. (With speech-to-text, the backend judges the audio and saves nothing unless debug recording is switched on.)
 
 ## Architecture
 
@@ -23,29 +23,31 @@ The goal of the project is a **testbed for AI agents that process voice recordin
 flowchart LR
   subgraph browser["Browser (React + WebGL)"]
     mic["Microphone"] --> rec["pcm-recorder.js<br/>AudioWorklet: 16 kHz, 100 ms chunks"]
-    rec --> link["link.ts<br/>WebSocket, numbers and keeps sent chunks"]
+    rec --> link["localLink.ts<br/>queue, press / release"]
+    link --> vad["speechDetector.ts<br/>Silero VAD (ONNX Runtime, WebAssembly)"]
+    link --> utt["utterances.ts<br/>start / end state machine"]
     link --> dot["RedDot.tsx<br/>state, pointer and keyboard input"]
     dot --> bubbles["speechBubbles.ts<br/>bubbles, growth, placement, playback"]
     dot --> gl["renderer.ts<br/>WebGL2 shader: dot + bubbles"]
     bubbles --> gl
   end
-  subgraph backend["Backend (FastAPI)"]
-    ws["/ws"] --> check["speech_check.py<br/>loudness + WebRTC VAD"]
-    check --> utt["utterances.py<br/>start / end state machine"]
-  end
-  link -- "mic on/off, PCM chunks" --> ws
-  ws -- "verdict per chunk,<br/>utterance ended: chunks first..last" --> link
 ```
 
 ### How a recording travels
 
-1. **Recording:** while the dot is held, the AudioWorklet `pcm-recorder.js` turns the microphone into 16 kHz, 16-bit mono PCM and hands over 100 ms chunks. `link.ts` sends each chunk over a WebSocket, numbers it, and keeps the last 60 seconds of chunks in memory.
-2. **Speech detection:** for every chunk, the backend checks two things: is it loud enough (RMS), and does WebRTC's voice detector hear a voice in most of its 20 ms frames? It answers with a **verdict** (`speech: true/false`), which drives the dot's look.
-3. **Utterances:** a small state machine in the backend turns the verdicts into utterances: 200 ms of speech starts one (plus 300 ms of audio from just before, so the first syllable isn't cut), 700 ms of quiet, letting go or 15 seconds end it. With speech-to-text Per press, pauses and the 15 seconds don't end it: one press is one utterance. With Live, the same, and with "Dot always on" the page listens all the time and a click on the dot ends the utterance (`{"type": "cut"}`); after 280 s the backend starts a new one itself, because a stream to Google may last at most 5 minutes.
-4. **Bubbles:** when an utterance starts, the backend says so, and it joins the bubble of the current press (the first one makes the bubble pop up); the bubble grows while it's spoken. When it ends, the backend only sends the **numbers of the chunks** it consists of. The browser assembles the audio from the chunks it kept and keeps it with the bubble. The audio never has to travel back, and the server stores nothing.
+1. **Recording:** while the dot is held, the AudioWorklet `pcm-recorder.js` turns the microphone into 16 kHz, 16-bit mono PCM and hands over 100 ms chunks (`microphone.ts`).
+2. **Speech detection:** `speechDetector.ts` gives Silero VAD the chunk in 32 ms frames (512 samples, with the end of the previous frame as context) and averages their speech probabilities: at least 0.5 is speech. The **verdict** drives the dot's look.
+3. **Utterances:** a small state machine (`utterances.ts`) turns the verdicts into utterances: 200 ms of speech starts one (plus 300 ms of audio from just before, so the first syllable isn't cut), 700 ms of quiet, letting go or 15 seconds end it. Utterances with less than 300 ms of speech are dropped (a click, a cough).
+4. **Bubbles:** when an utterance starts, it joins the bubble of the current press (the first one makes the bubble pop up); the bubble grows while it's spoken. When it ends, its audio is kept with the bubble.
 5. **Playback:** tapping a bubble plays its utterances with the Web Audio API.
 
-### The protocol (WebSocket `/ws`)
+The chunks are judged one after another (a queue in `localLink.ts`), so verdicts and utterances keep their order although each judgement is asynchronous.
+
+### With speech-to-text (`VITE_SPEECH_TO_TEXT=1`)
+
+Then `link.ts` replaces `localLink.ts`: it streams the chunks over a WebSocket to the backend (`redDotServer/`), which detects speech itself (loudness + WebRTC VAD, `speech_check.py`; the same utterance rules in `utterances.py`) and sends the text from RecordingToText back. The backend only sends the **numbers of the chunks** an utterance consists of; the browser assembles the audio from the chunks it kept, so the audio never travels back.
+
+#### The protocol (WebSocket `/ws`)
 
 | Direction | Message | Meaning |
 |---|---|---|
@@ -68,7 +70,7 @@ flowchart LR
 ```
 red-dot/                              the React app (Vite, TypeScript)
 ├── public/pcm-recorder.js            AudioWorklet: microphone -> 100 ms PCM chunks
-├── vite.config.ts                    dev proxy: /ws and /healthz -> backend on :8090
+├── vite.config.ts                    dev proxy: /ws and /healthz -> backend on :8090 (speech-to-text only)
 └── src/components/RedDotCode/
     ├── RedDotPage.tsx                full-screen page
     ├── RedDot.tsx                    the component: state, input, animation loop
@@ -79,9 +81,13 @@ red-dot/                              the React app (Vite, TypeScript)
     ├── SettingsPanel.tsx             the settings button and panel (speech-to-text)
     ├── settings.ts                   what the panel offers, remembered in the browser
     ├── uiText.ts                     the panel's texts in English and German (VITE_UI_LANGUAGE)
-    ├── link.ts                       WebSocket, microphone, chunk store, recordings
-    ├── useVoiceLink.ts               React hook around link.ts
-    └── redDotServer/                 the backend (FastAPI)
+    ├── microphone.ts                 microphone -> 100 ms chunks (pcm-recorder.js)
+    ├── speechDetector.ts             is this 100 ms chunk speech? Silero VAD in the browser
+    ├── utterances.ts                 cuts the stream into utterances
+    ├── localLink.ts                  default: mic, detection and utterances, all in the browser
+    ├── link.ts                       with speech-to-text: WebSocket, chunk store, recordings
+    ├── useVoiceLink.ts               React hook around localLink.ts or link.ts (VITE_SPEECH_TO_TEXT)
+    └── redDotServer/                 the backend (FastAPI), only for speech-to-text
         ├── server.py                 /healthz and /ws, origin check, logging
         ├── speech_check.py           is this 100 ms chunk speech?
         ├── utterances.py             cuts the stream into utterances
@@ -103,60 +109,52 @@ docs/screenshot.png
 
 **Requirements:** Node.js 22 or newer (developed with 24) and Python 3.10 or newer (developed with 3.12). Microphone access works on `http://localhost` and on `https://` pages.
 
-### 1. Install
+### 1. Install and start
 
 ```bash
-cd red-dot && npm install
-cd src/components/RedDotCode/redDotServer && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+cd red-dot && npm install && npm run dev
 ```
 
-### 2. Start the backend (terminal 1)
+Open **http://localhost:5173**. That's all: by default the page needs no backend.
+
+### 2. Test it
+
+1. The dot is **red** once the speech detector has loaded (grey before).
+2. **Hold the dot and say a sentence.** The dot turns a more intense red and moves faster.
+3. **While you speak:** a speech bubble pops up above the dot (a little to the side) and grows, its trail of small puffs pointing at the dot. Pause and speak again: it keeps growing (up to its full size). Drag the dot while you speak: the bubble comes along. Let go: the bubble is complete and stays where it is (its tail too), and the next press gets a new one.
+4. **Tap the bubble:** you hear what you said; it pulsates while it plays.
+5. **Drag the bubble and the dot** around the screen; they stay on screen. Drop a bubble on the bin to remove it.
+6. **Hold `R`** to record without moving the dot.
+
+### Optional: speech-to-text
+
+This needs the backend, and the page started (or built) with `VITE_SPEECH_TO_TEXT=1`; the backend then also detects speech. Install the backend once:
 
 ```bash
-cd red-dot/src/components/RedDotCode/redDotServer && .venv/bin/uvicorn server:app --port 8090
+cd red-dot/src/components/RedDotCode/redDotServer && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 ```
 
-The terminal shows one log line per 100 ms chunk while you talk, and every utterance. Locally, each utterance is also saved as a WAV file in `debug-audio/` (see [Configuration](#configuration)).
-
-**Optional: speech-to-text.** To see the text of what you say inside the bubbles, start
-RecordingToText first (another terminal; setup in [recording-to-text/README.md](recording-to-text/README.md)):
+Start RecordingToText (setup in [recording-to-text/README.md](recording-to-text/README.md)), the backend and the page, each in its own terminal:
 
 ```bash
 cd recording-to-text && .venv/bin/uvicorn recording_to_text.server:app --port 8092
 ```
 
-and start the backend with its address:
-
 ```bash
 cd red-dot/src/components/RedDotCode/redDotServer && RECORDING_TO_TEXT_URL=http://localhost:8092 .venv/bin/uvicorn server:app --port 8090
 ```
 
-Choose mode, service and language with the settings button in the bottom right corner of the
-page (default: Live, Google long, German). The backend's terminal also logs the text, in lines
-starting with `>>>`.
-
-### 3. Start the frontend (terminal 2)
-
 ```bash
-cd red-dot && npm run dev
+cd red-dot && VITE_SPEECH_TO_TEXT=1 npm run dev
 ```
 
-Open **http://localhost:5173**. Use `localhost`, not `127.0.0.1`: the backend only accepts the origins listed in `ALLOWED_ORIGINS`.
-
-### 4. Test it
-
-1. The dot is **red** (connected); grey means the page can't reach the backend.
-2. **Hold the dot and say a sentence.** The backend logs `SPEECH`, the dot turns a more intense red and moves faster.
-3. **While you speak:** the backend logs `utterance started`, and a speech bubble pops up above the dot (a little to the side) and grows, its trail of small puffs pointing at the dot. Pause and speak again: it keeps growing (up to its full size). Drag the dot while you speak: the bubble comes along. Let go: the bubble is complete and stays where it is (its tail too), and the next press gets a new one.
-4. **Tap the bubble:** you hear what you said; it pulsates while it plays.
-5. **Drag the bubble and the dot** around the screen; they stay on screen. Drop a bubble on the bin to remove it.
-6. **Hold `R`** to record without moving the dot.
+Open **http://localhost:5173**. Use `localhost`, not `127.0.0.1`: the backend only accepts the origins listed in `ALLOWED_ORIGINS`. The backend's terminal shows one log line per 100 ms chunk while you talk, every utterance (locally also saved as a WAV file in `debug-audio/`, see [Configuration](#configuration)), and the text, in lines starting with `>>>`. Choose mode, service and language with the settings button in the bottom right corner (default: Live, Google long, German); the text appears inside the bubbles.
 
 There are no automated tests yet. `npm run build` type-checks the frontend (`tsc -b`) before building, and `npm run lint` runs the linter.
 
 ## Configuration
 
-**Backend** (environment variables):
+**Backend** (environment variables; only used with speech-to-text):
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -172,8 +170,11 @@ There are no automated tests yet. `npm run build` type-checks the frontend (`tsc
 |---|---|---|
 | `VITE_BACKEND_URL` | – (the page's own address) | the backend's public address, e.g. `https://api.example.com`. Leave it unset for development: Vite's proxy forwards `/ws` and `/healthz` to `localhost:8090` |
 | `VITE_UI_LANGUAGE` | `en` | the settings menu's language: `de` for German, otherwise English (`uiText.ts` has the texts) |
+| `VITE_SPEECH_TO_TEXT` | – (off) | `1`: speech-to-text, with the settings menu; the audio goes to the backend, which also detects speech. Off: everything stays in the browser, no backend |
 
 ## Deployment
+
+**Without speech-to-text** (the default) the page is a plain static site: `npm run build` and serve `red-dot/dist/` over HTTPS (browsers only allow the microphone on secure pages); serve `.wasm` files as `application/wasm`. No backend is needed. The rest of this section is for a build with speech-to-text (`VITE_SPEECH_TO_TEXT=1`).
 
 The frontend is a static site; the backend is a small Python service behind a reverse proxy. Two (sub)domains, both with HTTPS (browsers only allow the microphone on secure pages), for example `example.com` for the page and `api.example.com` for the backend.
 

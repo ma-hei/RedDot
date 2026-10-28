@@ -18,6 +18,9 @@
 // KEEP_SECONDS of them. When the server says "utterance ended: chunks 12..38", the page
 // assembles those chunks itself, so the audio never has to travel back from the server.
 
+import { CHUNK_SAMPLES, openMicrophone, SAMPLE_RATE } from './microphone.ts'
+import type { Microphone } from './microphone.ts'
+
 export interface Verdict {
   type: 'verdict'
   speech: boolean                    // this 100 ms chunk counted as speech
@@ -67,7 +70,8 @@ type ServerMessage =
   | { type: 'transcription'; available: boolean }
   | { type: 'text_error'; message: string }
 
-export type LinkStatus = 'connecting' | 'connected' | 'disconnected' | `microphone blocked: ${string}`
+// 'unavailable': only localLink.ts (its speech detector couldn't load).
+export type LinkStatus = 'connecting' | 'connected' | 'disconnected' | `microphone blocked: ${string}` | `unavailable: ${string}`
 
 export interface LinkCallbacks {
   onStatus?: (status: LinkStatus) => void
@@ -100,16 +104,13 @@ function wsUrl(path: string): string {
   return (BACKEND_URL || location.origin).replace(/^http/, 'ws') + path
 }
 
-const SAMPLE_RATE = 16000
-const CHUNK_SAMPLES = 1600            // 100 ms, as pcm-recorder.js makes them
 const KEEP_SECONDS = 300              // an utterance is at most 15 s, or a whole press (speech-to-text live or per press, < 5 min)
 const KEEP_CHUNKS = KEEP_SECONDS * SAMPLE_RATE / CHUNK_SAMPLES
 
 export function createLink({ onStatus = () => {}, onVerdict = () => {}, onUtterance = () => {}, onText = () => {},
                              onTranscription = () => {}, onTextError = () => {} }: LinkCallbacks = {}): Link {
   let ws: WebSocket | null = null
-  let micCtx: AudioContext | null = null
-  let micStream: MediaStream | null = null
+  let mic: Promise<Microphone> | null = null  // opened on the first press, kept (see microphone.ts)
   let held = false      // press() called, release() not yet
   let talking = false   // held, mic ready and the server told: audio is being sent
   let disposed = false
@@ -184,34 +185,12 @@ export function createLink({ onStatus = () => {}, onVerdict = () => {}, onUttera
     }
   }
 
-  async function startMic(): Promise<void> {
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-    })
-    const ctx = new AudioContext({ sampleRate: 16000 })  // the browser resamples the mic to 16 kHz
-    micStream = stream
-    micCtx = ctx
-    // Started without a click or key (live speech-to-text listens from the start), browsers keep
-    // audio paused until the page is first used: resume it then.
-    if (ctx.state === 'suspended') {
-      const resume = () => {
-        void ctx.resume()
-        document.removeEventListener('pointerdown', resume)
-        document.removeEventListener('keydown', resume)
-      }
-      document.addEventListener('pointerdown', resume)
-      document.addEventListener('keydown', resume)
-    }
-    await ctx.audioWorklet.addModule(`/pcm-recorder.js?v=${Date.now()}`)
-    const node = new AudioWorkletNode(ctx, 'pcm-recorder')
-    // 100 ms chunks of 16-bit PCM, only sent while pressed; numbered and kept for recordings
-    node.port.onmessage = (e: MessageEvent<ArrayBuffer>) => {
-      if (!talking || !send(e.data)) return
-      sentChunks += 1
-      kept.set(sentChunks, e.data)
-      kept.delete(sentChunks - KEEP_CHUNKS)  // forget what's older than KEEP_SECONDS
-    }
-    ctx.createMediaStreamSource(stream).connect(node)
+  // 100 ms chunks of 16-bit PCM, only sent while pressed; numbered and kept for recordings
+  function onChunk(chunk: ArrayBuffer): void {
+    if (!talking || !send(chunk)) return
+    sentChunks += 1
+    kept.set(sentChunks, chunk)
+    kept.delete(sentChunks - KEEP_CHUNKS)  // forget what's older than KEEP_SECONDS
   }
 
   async function press(): Promise<boolean> {
@@ -219,8 +198,9 @@ export function createLink({ onStatus = () => {}, onVerdict = () => {}, onUttera
     if (ws?.readyState !== WebSocket.OPEN) return false
     held = true
     try {
-      if (!micCtx) await startMic()  // first press: asks for permission; afterwards instant
+      await (mic ??= openMicrophone(onChunk))  // first press: asks for permission; afterwards instant
     } catch (err) {
+      mic = null                     // refused: ask again on the next press
       held = false
       onStatus(`microphone blocked: ${err instanceof Error ? err.message : String(err)}`)
       return false
@@ -252,8 +232,7 @@ export function createLink({ onStatus = () => {}, onVerdict = () => {}, onUttera
     release()
     disposed = true
     ws?.close()
-    micStream?.getTracks().forEach((t) => t.stop())
-    micCtx?.close()
+    void mic?.then((m) => m.close(), () => {})
   }
 
   waitForServer()
