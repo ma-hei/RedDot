@@ -2,7 +2,7 @@
 
 ![RedDot: the red dot with four recorded utterances around it](docs/screenshot.png)
 
-**RedDot is a frontend for voice input.** Hold the red dot and speak: the dot reacts while it hears speech, and a speech bubble pops up above it and grows while you talk, its tail pointing at the dot. Tap a bubble to hear what you said again, drag bubbles and the dot around the screen.
+**RedDot is a frontend for voice input.** Hold the red dot and speak: the dot reacts while it hears speech, and a speech bubble (a cloud) pops up above it and grows while you talk, a trail of small puffs pointing at the dot. Tap a bubble to hear what you said again, drag bubbles and the dot around the screen.
 
 The goal of the project is a **testbed for AI agents that process voice recordings**: speech-to-text engines, language models and agents that act on what was said. Each utterance is a self-contained recording, which makes it easy to send the same audio to several agents and **compare their results side by side**. The voice input, speech detection and utterance handling are in place; connecting and comparing agents is the next step (see [Roadmap](#roadmap)).
 
@@ -11,7 +11,7 @@ The goal of the project is a **testbed for AI agents that process voice recordin
 - **Push to talk:** hold the dot (mouse, finger or the `R` key) to record; let go to stop.
 - **Live speech detection:** a backend judges every 100 ms of audio (loudness + WebRTC voice activity detection); the dot turns a more intense red, glows and moves faster while speech is heard.
 - **Utterances:** the audio is cut into utterances at pauses (0.7 s of quiet), when you let go, or after 15 s.
-- **Speech bubbles:** each press of the dot gets a speech bubble. It pops up when the first utterance starts: above the dot, a little to the right or left, if there's room; only if older bubbles (or the screen's edge) take up the space above, below the dot. It grows with the seconds of speech it holds (all the utterances of that press) up to a full size (20 s). While the press goes on, it moves with the dot and its tail points at the dot; when you let go, it stays where it is and its tail keeps its direction. Tap it to play its utterances one after the other, drag it to arrange your bubbles, or drop it on the **bin** at the bottom of the screen to remove it (with its text).
+- **Speech bubbles:** each press of the dot gets a speech bubble: a cloud of round puffs, with a trail of small puffs (its tail). It pops up when the first utterance starts: above the dot, a little to the right or left, if there's room; only if older bubbles (or the screen's edge) take up the space above, below the dot. It grows with the seconds of speech it holds (all the utterances of that press) up to a full size (20 s). While the press goes on, it moves with the dot and its tail points at the dot; when you let go, it stays where it is and its tail keeps its direction. Tap it to play its utterances one after the other, drag it to arrange your bubbles, or drop it on the **bin** at the bottom of the screen to remove it (with its text).
 - **Speech-to-text (optional):** the text of a bubble's utterances appears inside it, with the service's confidence; a text longer than the bubble shows its newest words, and the mouse wheel over the bubble scrolls back. **Per utterance** (mode 2): each pause ends an utterance, and its audio is sent right then; its text follows 1–2 s later. **Live** (mode 1): everything said during one press is one utterance; your words appear with the bubble and are revised as you go, and settle when you let go. **Dot always on** (an option for these two): the dot listens all the time, no holding (but not while the tab is hidden); **click the dot** (or press `R`) to end the current bubble there, and listening goes on into the next one. With Per utterance, pauses still end utterances by themselves (in the same bubble). Dragging the dot just moves it. **Per press** (mode 3): like Live, the whole press is one utterance, but nothing is sent while you hold the dot; when you let go, the press goes as one recording (Google: up to 1 minute). Service (Google long, Google chirp_2, Whisper) and language (German, English, detect) are chosen with the small settings button in the corner; it goes through [RecordingToText](recording-to-text/README.md).
 - **Draggable dot:** pick up the dot while recording and move it around.
 - **Full-screen WebGL:** the dot and bubbles are drawn by a fragment shader, on desktop and mobile.
@@ -95,7 +95,7 @@ docs/screenshot.png
 ### Design decisions
 
 - **React renders the canvas once; the animation runs outside React.** 60 frames and 10 verdicts per second live in refs, not in React state, so they never cause re-renders.
-- **One shader draws everything.** For each pixel it computes the distance to the dot's (wobbling) edge and to every bubble's oval and tail. The looks are plain numbers in `looks.ts`.
+- **One shader draws everything.** For each pixel it computes the distance to the dot's (wobbling) edge and to every bubble's cloud (an oval core and its puffs) and trail. The looks are plain numbers in `looks.ts`.
 - **The backend decides, the browser keeps the audio.** Speech detection runs in one place, so every client is judged the same way, while recordings stay on the device.
 - **Only your own page may connect.** CORS covers `/healthz`, an explicit `Origin` check covers the WebSocket (`ALLOWED_ORIGINS`).
 
@@ -147,7 +147,7 @@ Open **http://localhost:5173**. Use `localhost`, not `127.0.0.1`: the backend on
 
 1. The dot is **red** (connected); grey means the page can't reach the backend.
 2. **Hold the dot and say a sentence.** The backend logs `SPEECH`, the dot turns a more intense red and moves faster.
-3. **While you speak:** the backend logs `utterance started`, and a speech bubble pops up above the dot (a little to the side) and grows, its tail pointing at the dot. Pause and speak again: it keeps growing (up to its full size). Drag the dot while you speak: the bubble comes along. Let go: the bubble is complete and stays where it is (its tail too), and the next press gets a new one.
+3. **While you speak:** the backend logs `utterance started`, and a speech bubble pops up above the dot (a little to the side) and grows, its trail of small puffs pointing at the dot. Pause and speak again: it keeps growing (up to its full size). Drag the dot while you speak: the bubble comes along. Let go: the bubble is complete and stays where it is (its tail too), and the next press gets a new one.
 4. **Tap the bubble:** you hear what you said; its outline turns white while it plays.
 5. **Drag the bubble and the dot** around the screen; they stay on screen. Drop a bubble on the bin to remove it.
 6. **Hold `R`** to record without moving the dot.

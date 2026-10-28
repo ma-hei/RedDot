@@ -7,14 +7,14 @@
 //   renderer.draw(look, phase, center, bubbles)
 //   renderer.dispose()
 //
-// Two meshes and four small shader programs, drawn in this order (later = on top):
+// Two meshes and three small shader programs, drawn in this order (later = on top):
 //
 //   glow     a ring around the dot; its transparency fades outwards; added onto the background
 //   dot      a disc (triangle fan); the vertex shader moves its edge points to make the wobble
-//   bubbles  per speech bubble: the disc again, stretched into an oval, plus one triangle for its
-//            tail (no mesh: its three corners are uniforms). First both in the outline colour,
-//            then both again, smaller by the outline's thickness, in the fill colour: what's
-//            left of the first is the outline, also around the joint of oval and tail.
+//   bubbles  per speech bubble (a cloud): the disc again, many times (instancing), as its oval core,
+//            its puffs and its trail's puffs. First all of them in the outline colour, then all
+//            again, smaller by the outline's thickness, in the fill colour: what's left of the
+//            first is the outline, around the whole cloud and between the puffs' bumps.
 //
 // Coordinates: everything is placed in device pixels (origin bottom left, like WebGL). The
 // projection matrix maps pixels to the GPU's clip space (-1..1); each object's model matrix
@@ -28,8 +28,8 @@
 import { BUBBLE } from './looks.ts'
 import type { Look, RGB } from './looks.ts'
 import type { OrbRenderer } from './renderer.ts'
-import { MAX_BUBBLES } from './speechBubbles.ts'
-import type { BubbleShape } from './speechBubbles.ts'
+import { MAX_BUBBLES, cloudPuffs } from './speechBubbles.ts'
+import type { BubbleShape, Puff } from './speechBubbles.ts'
 
 const DOT_SEGMENTS = 128   // edge points of the disc: enough for a smooth, wobbling outline
 const GLOW_REACH = 0.4     // how far the glow reaches beyond the edge (mesh units); exp(-18 * 0.4) ≈ 0.001
@@ -91,23 +91,16 @@ void main() {
   outColor = vec4(u_color, strength);                         // blended additively onto the background
 }`
 
-// A bubble's oval: the dot's disc mesh, put in place and stretched by u_oval (no wobble).
-const OVAL_VERTEX = /* glsl */ `#version 300 es
+// A bubble's ovals (core, puffs, trail): the dot's disc mesh, drawn once per oval (instancing),
+// each put in place and stretched by its own a_oval (no wobble).
+const OVALS_VERTEX = /* glsl */ `#version 300 es
 layout(location = 0) in float a_angle;
 layout(location = 1) in float a_edge;
+layout(location = 2) in vec4 a_oval;   // per instance: centre, half width, half height (pixels)
 uniform mat4 u_projection;
-uniform vec4 u_oval;         // centre, half width, half height (pixels)
 void main() {
-  vec2 pos = u_oval.xy + a_edge * u_oval.zw * vec2(cos(a_angle), sin(a_angle));
+  vec2 pos = a_oval.xy + a_edge * a_oval.zw * vec2(cos(a_angle), sin(a_angle));
   gl_Position = u_projection * vec4(pos, 0.0, 1.0);
-}`
-
-// A bubble's tail: one triangle, its corners given directly (gl_VertexID: which corner).
-const TAIL_VERTEX = /* glsl */ `#version 300 es
-uniform mat4 u_projection;
-uniform vec2 u_corners[3];   // pixels
-void main() {
-  gl_Position = u_projection * vec4(u_corners[gl_VertexID], 0.0, 1.0);
 }`
 
 // ---------------- matrices (column-major, as WebGL expects) ----------------
@@ -149,20 +142,6 @@ function glowMesh(): Float32Array {  // triangle strip: inner and outer point at
   return new Float32Array(v)
 }
 
-/** The triangle a, b, c moved inwards by t on every side (shrunk towards its incentre). */
-function insetTriangle(a: [number, number], b: [number, number], c: [number, number], t: number): number[] {
-  const la = Math.hypot(b[0] - c[0], b[1] - c[1])   // each side's length, opposite its corner
-  const lb = Math.hypot(c[0] - a[0], c[1] - a[1])
-  const lc = Math.hypot(a[0] - b[0], a[1] - b[1])
-  const perimeter = la + lb + lc || 1
-  const ix = (la * a[0] + lb * b[0] + lc * c[0]) / perimeter   // the incentre
-  const iy = (la * a[1] + lb * b[1] + lc * c[1]) / perimeter
-  const area = Math.abs((b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1])) / 2
-  const inradius = (2 * area) / perimeter
-  const k = inradius > t ? (inradius - t) / inradius : 0
-  return [a, b, c].flatMap(([x, y]) => [ix + (x - ix) * k, iy + (y - iy) * k])
-}
-
 // ---------------- the renderer ----------------
 export function createOrbRenderer(canvas: HTMLCanvasElement): OrbRenderer {
   const context = canvas.getContext('webgl2', { antialias: true })  // antialias: the GPU smooths triangle edges (MSAA)
@@ -171,8 +150,7 @@ export function createOrbRenderer(canvas: HTMLCanvasElement): OrbRenderer {
 
   const dot = makeProgram(gl, DOT_VERTEX, DOT_FRAGMENT)
   const glow = makeProgram(gl, GLOW_VERTEX, GLOW_FRAGMENT)
-  const oval = makeProgram(gl, OVAL_VERTEX, DOT_FRAGMENT)
-  const tail = makeProgram(gl, TAIL_VERTEX, DOT_FRAGMENT)
+  const ovals = makeProgram(gl, OVALS_VERTEX, DOT_FRAGMENT)
 
   // A VAO (vertex array object) remembers which buffers feed which shader inputs, so drawing
   // an object later only needs bindVertexArray + draw.
@@ -180,7 +158,19 @@ export function createOrbRenderer(canvas: HTMLCanvasElement): OrbRenderer {
   const dotVao = makeVao(gl, dotData)
   const glowData = glowMesh()
   const glowVao = makeVao(gl, glowData)
-  const noInputs = gl.createVertexArray()   // the tail reads no vertex data, but drawing needs a VAO bound
+  // The bubbles' ovals: the disc mesh again, in its own VAO, plus one oval per instance
+  // (vertexAttribDivisor = 1: read once per oval instead of once per vertex).
+  const ovalsVao = makeVao(gl, dotData)
+  const OVALS_PER_BUBBLE = 1 + BUBBLE.puffs + BUBBLE.trail.length
+  const ovalData = new Float32Array(OVALS_PER_BUBBLE * 4)
+  const ovalBuffer = gl.createBuffer()
+  gl.bindVertexArray(ovalsVao.vao)
+  gl.bindBuffer(gl.ARRAY_BUFFER, ovalBuffer)
+  gl.bufferData(gl.ARRAY_BUFFER, ovalData.byteLength, gl.DYNAMIC_DRAW)
+  gl.enableVertexAttribArray(2)
+  gl.vertexAttribPointer(2, 4, gl.FLOAT, false, 0, 0)
+  gl.vertexAttribDivisor(2, 1)
+  gl.bindVertexArray(null)
 
   function resize(): void {
     const dpr = window.devicePixelRatio || 1
@@ -229,37 +219,35 @@ export function createOrbRenderer(canvas: HTMLCanvasElement): OrbRenderer {
     gl.drawArrays(gl.TRIANGLE_FAN, 0, dotData.length / 2)
 
     // 3. the bubbles, in order (the last on top): outline shape, then the fill shape over it.
-    // CSS pixels (y from the top) -> device pixels (y from the bottom).
+    // The shapes are in CSS pixels (y from the top); drawOvals turns them into device pixels (y from the bottom).
     const scale = width / Math.max(1, canvas.clientWidth)
-    const px = ([x, y]: [number, number]): [number, number] => [x * scale, height - y * scale]
     for (const bubble of bubbles.slice(-MAX_BUBBLES)) {
-      const c = px(bubble.center)
-      const [rx, ry] = [bubble.radii[0] * scale, bubble.radii[1] * scale]
-      const [a, b, tip] = bubble.tail.map(px)
-      const t = bubble.outline * scale
+      const { core, puffs } = cloudPuffs(bubble.center, bubble.radii, bubble.seed)
+      const circles: Puff[] = [...puffs, ...bubble.trail]
+      const t = bubble.outline
       const mix = (from: RGB, to: RGB): RGB => [0, 1, 2].map((i) => from[i] + (to[i] - from[i]) * bubble.glow) as RGB
-      drawBubbleShape(projection, c, rx, ry, [...a, ...b, ...tip], mix(BUBBLE.color, [1, 1, 1]))   // white while playing
-      drawBubbleShape(projection, c, Math.max(0, rx - t), Math.max(0, ry - t), insetTriangle(a, b, tip, t),
-                      mix(BUBBLE.fill, BUBBLE.playingFill))
+      // Outline colour (white while playing), then the same shapes smaller by t in the fill colour.
+      drawOvals(projection, scale, bubble.center, core, circles, 0, mix(BUBBLE.color, [1, 1, 1]))
+      drawOvals(projection, scale, bubble.center, core, circles, t, mix(BUBBLE.fill, BUBBLE.playingFill))
     }
     gl.bindVertexArray(null)
   }
 
-  // One bubble's oval and tail in one colour.
-  function drawBubbleShape(projection: Float32Array, c: [number, number], rx: number, ry: number,
-                           corners: number[], color: RGB): void {
-    gl.useProgram(oval.program)
-    gl.uniformMatrix4fv(oval.u('u_projection'), false, projection)
-    gl.uniform4f(oval.u('u_oval'), c[0], c[1], rx, ry)
-    gl.uniform3fv(oval.u('u_color'), color)
-    gl.bindVertexArray(dotVao.vao)
-    gl.drawArrays(gl.TRIANGLE_FAN, 0, dotData.length / 2)
-    gl.useProgram(tail.program)
-    gl.uniformMatrix4fv(tail.u('u_projection'), false, projection)
-    gl.uniform2fv(tail.u('u_corners'), corners)
-    gl.uniform3fv(tail.u('u_color'), color)
-    gl.bindVertexArray(noInputs)
-    gl.drawArrays(gl.TRIANGLES, 0, 3)
+  // One bubble's core and circles (CSS pixels), each smaller by `shrink`, in one colour: one instanced draw.
+  function drawOvals(projection: Float32Array, scale: number, center: [number, number], core: [number, number],
+                     circles: Puff[], shrink: number, color: RGB): void {
+    const { height } = canvas
+    const put = (i: number, x: number, y: number, rx: number, ry: number) =>
+      ovalData.set([x * scale, height - y * scale, Math.max(0, rx - shrink) * scale, Math.max(0, ry - shrink) * scale], i * 4)
+    put(0, center[0], center[1], core[0], core[1])
+    circles.forEach(([x, y, r], i) => put(i + 1, x, y, r, r))
+    gl.useProgram(ovals.program)
+    gl.uniformMatrix4fv(ovals.u('u_projection'), false, projection)
+    gl.uniform3fv(ovals.u('u_color'), color)
+    gl.bindVertexArray(ovalsVao.vao)
+    gl.bindBuffer(gl.ARRAY_BUFFER, ovalBuffer)
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, ovalData, 0, (circles.length + 1) * 4)
+    gl.drawArraysInstanced(gl.TRIANGLE_FAN, 0, dotData.length / 2, circles.length + 1)
   }
 
   // The uniforms the glow and the dot share: matrices, the wobbling edge, the colour.
@@ -275,9 +263,9 @@ export function createOrbRenderer(canvas: HTMLCanvasElement): OrbRenderer {
   }
 
   function dispose(): void {
-    for (const p of [dot, glow, oval, tail]) p.dispose()
-    for (const v of [dotVao, glowVao]) v.dispose()
-    gl.deleteVertexArray(noInputs)
+    for (const p of [dot, glow, ovals]) p.dispose()
+    for (const v of [dotVao, glowVao, ovalsVao]) v.dispose()
+    gl.deleteBuffer(ovalBuffer)
   }
 
   return { draw, dispose }

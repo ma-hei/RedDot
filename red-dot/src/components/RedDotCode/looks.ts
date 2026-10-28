@@ -40,8 +40,8 @@ type Blend = 'online' | 'pressed' | 'speech'
 
 // ---------------- the speech bubbles: design them here ----------------
 // One bubble per press of the dot: it pops up when the first utterance starts and grows with the
-// seconds of speech it holds, up to its full size. An outlined oval with a tail that points at the
-// dot while the press goes on, and keeps that direction afterwards.
+// seconds of speech it holds, up to its full size. A cloud (round puffs around an oval) with a
+// trail of small puffs that points at the dot while the press goes on, and keeps that direction afterwards.
 // Sizes are shares of the shorter screen side, like the dot's radius.
 export const BUBBLE = {
   minRadius: 0.04,                    // half its height when it pops up
@@ -49,8 +49,13 @@ export const BUBBLE = {
   fullSeconds: 20,                    // this much speech makes it full size (it grows fastest at first)
   aspect: 1.35,                       // width / height
   outline: 0.005,                     // the outline's thickness
-  tail: 0.4,                          // how far the tail reaches beyond the oval (share of its half height)
-  tailWidth: 0.7,                     // the tail's width where it leaves the oval (share of its half height)
+  puffs: 8,                           // round puffs around the cloud's edge
+  puffSize: 0.42,                     // a puff's radius (share of its half height)...
+  puffVariety: 0.12,                  // ...each a little bigger or smaller, by up to this share
+  // The trail towards the dot: small puffs, each this far beyond the cloud's edge, this big (both
+  // shares of its half height). tail: how far the trail reaches, for keeping room next to the dot.
+  trail: [{ at: 0.32, size: 0.16 }, { at: 0.7, size: 0.09 }],
+  tail: 0.8,
   tilt: 0.45,                         // a new bubble goes above the dot, this far off straight up (radians, ≈ 25°)
   popSeconds: 0.35,                   // popping up: from nothing to its size, overshooting a little
   breathe: 0.035,                     // while its press goes on, its size swings by this share...

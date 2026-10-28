@@ -32,9 +32,14 @@ uniform vec2 u_center;    // where the dot is, in pixels (WebGL counts y from th
 uniform float u_radius, u_wobble, u_lobes, u_phase, u_squash, u_glow;
 uniform vec3 u_color;
 // The speech bubbles (see BUBBLE in looks.ts), in pixels with y from the bottom; three per bubble:
-// (centre, half width, half height), (tail corner a, tail corner b), (tail tip, glow 0..1, outline)
+// (centre, how far the cloud reaches across and up), (trail puff 1's centre, trail puff 2's centre),
+// (trail puff 1's radius, trail puff 2's radius, glow 0..1, seed)
+#define PUFFS ${BUBBLE.puffs}
+#define PUFF_SIZE ${BUBBLE.puffSize.toFixed(4)}
+#define PUFF_VARIETY ${BUBBLE.puffVariety.toFixed(4)}
 uniform int u_bubbleCount;
 uniform vec4 u_bubbles[MAX_BUBBLES * 3];
+uniform float u_bubbleOutline;   // in pixels
 uniform vec3 u_bubbleColor, u_bubbleFill, u_bubblePlayingFill;
 out vec4 outColor;
 
@@ -45,31 +50,36 @@ float ovalDistance(vec2 p, vec2 r) {
   return k1 > 0.0 ? k0 * (k0 - 1.0) / k1 : -min(r.x, r.y);
 }
 
-// Distance to a triangle (exact; Inigo Quilez's sdTriangle).
-float triangleDistance(vec2 p, vec2 p0, vec2 p1, vec2 p2) {
-  vec2 e0 = p1 - p0, e1 = p2 - p1, e2 = p0 - p2;
-  vec2 v0 = p - p0, v1 = p - p1, v2 = p - p2;
-  vec2 pq0 = v0 - e0 * clamp(dot(v0, e0) / dot(e0, e0), 0.0, 1.0);
-  vec2 pq1 = v1 - e1 * clamp(dot(v1, e1) / dot(e1, e1), 0.0, 1.0);
-  vec2 pq2 = v2 - e2 * clamp(dot(v2, e2) / dot(e2, e2), 0.0, 1.0);
-  float s = sign(e0.x * e2.y - e0.y * e2.x);
-  vec2 d = min(min(vec2(dot(pq0, pq0), s * (v0.x * e0.y - v0.y * e0.x)),
-                   vec2(dot(pq1, pq1), s * (v1.x * e1.y - v1.y * e1.x))),
-                   vec2(dot(pq2, pq2), s * (v2.x * e2.y - v2.y * e2.x)));
-  return -sqrt(d.x) * sign(d.y);
+// Distance to a cloud: its oval core and the round puffs around it (cloudPuffs in speechBubbles.ts
+// computes the same puffs; y is flipped here, hence -sin). grow: make it bigger (< 0: smaller).
+float cloudDistance(vec2 p, vec2 c, vec2 r, float seed, float grow) {
+  float rp = r.y * PUFF_SIZE;
+  vec2 core = max(r - rp, vec2(0.5));
+  float d = ovalDistance(p - c, core) - grow;
+  for (int k = 0; k < PUFFS; k++) {
+    float angle = 6.2831853 * float(k) / float(PUFFS) + seed;
+    vec2 at = c + core * vec2(cos(angle), -sin(angle));
+    float rk = rp * (1.0 + PUFF_VARIETY * sin(float(k) * 2.3 + seed * 3.0));
+    d = min(d, length(p - at) - rk - grow);
+  }
+  return d;
 }
 
-// Draw every bubble over col: the oval joined with its tail in the outline colour, and the same
-// shape, smaller by the outline's thickness, in the fill colour on top.
+// Draw every bubble over col: the cloud and its trail in the outline colour, and the same shapes,
+// smaller by the outline's thickness, in the fill colour on top.
 vec3 drawBubbles(vec3 col) {
   vec2 p = gl_FragCoord.xy;
+  float t = u_bubbleOutline;
   for (int i = 0; i < MAX_BUBBLES; i++) {
     if (i >= u_bubbleCount) break;
-    vec4 oval = u_bubbles[i * 3], tail = u_bubbles[i * 3 + 1], more = u_bubbles[i * 3 + 2];
-    float t = more.w;
-    float tailD = triangleDistance(p, tail.xy, tail.zw, more.xy);
-    float outer = min(ovalDistance(p - oval.xy, max(oval.zw, vec2(0.5))), tailD);  // (popping up, it starts at 0)
-    float inner = min(ovalDistance(p - oval.xy, max(oval.zw - t, vec2(0.5))), tailD + t);
+    vec4 cloud = u_bubbles[i * 3], trail = u_bubbles[i * 3 + 1], more = u_bubbles[i * 3 + 2];
+    vec2 c = cloud.xy, r = max(cloud.zw, vec2(0.5));   // (popping up, it starts at 0)
+    // Far from this bubble and its trail: nothing to draw here.
+    float reach = max(max(r.x, r.y) * (1.0 + PUFF_VARIETY), max(length(trail.xy - c) + more.x, length(trail.zw - c) + more.y));
+    if (length(p - c) > reach + 2.0) continue;
+    float trailD = min(length(p - trail.xy) - more.x, length(p - trail.zw) - more.y);
+    float outer = min(cloudDistance(p, c, r, more.w, 0.0), trailD);
+    float inner = min(cloudDistance(p, c, r, more.w, -t), trailD + t);
     col = mix(col, mix(u_bubbleColor, vec3(1.0), more.z), 1.0 - smoothstep(-1.0, 1.0, outer));  // white while playing
     col = mix(col, mix(u_bubbleFill, u_bubblePlayingFill, more.z), 1.0 - smoothstep(-1.0, 1.0, inner));
   }
@@ -91,7 +101,7 @@ void main() {
 }`
 
 const UNIFORMS = ['u_res', 'u_center', 'u_radius', 'u_wobble', 'u_lobes', 'u_phase', 'u_squash', 'u_glow', 'u_color',
-  'u_bubbleCount', 'u_bubbles', 'u_bubbleColor', 'u_bubbleFill', 'u_bubblePlayingFill'] as const
+  'u_bubbleCount', 'u_bubbles', 'u_bubbleOutline', 'u_bubbleColor', 'u_bubbleFill', 'u_bubblePlayingFill'] as const
 type Uniform = (typeof UNIFORMS)[number]
 
 export function createOrbRenderer(canvas: HTMLCanvasElement): OrbRenderer {
@@ -143,11 +153,13 @@ export function createOrbRenderer(canvas: HTMLCanvasElement): OrbRenderer {
     const px = ([x, y]: [number, number]): [number, number] => [x * scale, canvas.height - y * scale]
     const count = Math.min(bubbles.length, MAX_BUBBLES)
     for (let i = 0; i < count; i++) {
-      const { center: c, radii: [rx, ry], tail: [a, b, tip], outline, glow } = bubbles[i]
-      bubbleData.set([...px(c), rx * scale, ry * scale, ...px(a), ...px(b), ...px(tip), glow, outline * scale], i * 12)
+      const { center: c, radii: [rx, ry], seed, trail: [t1, t2], glow } = bubbles[i]
+      bubbleData.set([...px(c), rx * scale, ry * scale, ...px([t1[0], t1[1]]), ...px([t2[0], t2[1]]),
+                      t1[2] * scale, t2[2] * scale, glow, seed], i * 12)
     }
     gl.uniform1i(u.u_bubbleCount, count)
     gl.uniform4fv(u.u_bubbles, bubbleData)
+    gl.uniform1f(u.u_bubbleOutline, (bubbles[0]?.outline ?? 1) * scale)   // the same for every bubble
     gl.uniform3fv(u.u_bubbleColor, BUBBLE.color)
     gl.uniform3fv(u.u_bubbleFill, BUBBLE.fill)
     gl.uniform3fv(u.u_bubblePlayingFill, BUBBLE.playingFill)

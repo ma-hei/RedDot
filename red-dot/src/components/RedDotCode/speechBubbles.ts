@@ -60,13 +60,42 @@ export interface Size {
   height: number
 }
 
-/** What the renderers draw for one bubble, in CSS pixels (y from the top). */
+/** A circle: centre and radius, in CSS pixels. */
+export type Puff = [x: number, y: number, r: number]
+
+/** What the renderers draw for one bubble, in CSS pixels (y from the top): a cloud, i.e. the
+ *  round puffs of cloudPuffs(center, radii, seed) around an oval core, and the trail's puffs. */
 export interface BubbleShape {
   center: [x: number, y: number]
-  radii: [rx: number, ry: number]                       // the oval
-  tail: [a: [number, number], b: [number, number], tip: [number, number]]  // a triangle; a, b inside the oval
+  radii: [rx: number, ry: number]                       // how far the cloud reaches (its puffs' outer edges)
+  seed: number                                          // where its puffs sit (radians): each cloud a little different
+  trail: Puff[]                                         // small puffs towards where the tail points
   outline: number                                       // its thickness
   glow: number
+}
+
+/**
+ * The cloud's puffs: BUBBLE.puffs circles, evenly around an oval that's smaller than the cloud by
+ * a puff's radius, each a little bigger or smaller. The core is that smaller oval (filled), so
+ * the cloud is the core plus the puffs. renderer.ts computes the same in its shader (keep both alike).
+ */
+export function cloudPuffs([cx, cy]: [number, number], [rx, ry]: [number, number], seed: number): { core: [number, number]; puffs: Puff[] } {
+  const r = ry * BUBBLE.puffSize
+  const core: [number, number] = [Math.max(0, rx - r), Math.max(0, ry - r)]
+  const puffs: Puff[] = []
+  for (let k = 0; k < BUBBLE.puffs; k++) {
+    const angle = (2 * Math.PI * k) / BUBBLE.puffs + seed
+    puffs.push([cx + core[0] * Math.cos(angle), cy + core[1] * Math.sin(angle),
+                r * (1 + BUBBLE.puffVariety * Math.sin(k * 2.3 + seed * 3))])
+  }
+  return { core, puffs }
+}
+
+/** A bubble's seed: from its id, so each cloud is a little different. */
+function seedOf(bubble: SpeechBubble): number {
+  let h = 0
+  for (const c of String(bubble.id)) h = (h * 31 + c.charCodeAt(0)) >>> 0
+  return ((h % 1000) / 1000) * ((2 * Math.PI) / BUBBLE.puffs)   // within one puff's spacing
 }
 
 let nextId = 1
@@ -178,30 +207,25 @@ function ovalReach([dx, dy]: [number, number], rx: number, ry: number): number {
   return 1 / Math.hypot(dx / rx, dy / ry)
 }
 
-/** Keep a centre so that the whole oval stays on the screen. */
+/** Keep a centre so that the whole cloud stays on the screen (its bigger puffs reach a little beyond rx, ry). */
 function clampBubble(x: number, y: number, rx: number, ry: number, size: Size): [number, number] {
   const clamp = (v: number, lo: number, hi: number) => Math.min(Math.max(v, lo), Math.max(lo, hi))
-  return [clamp(x, rx, size.width - rx), clamp(y, ry, size.height - ry)]
+  const pad = ry * BUBBLE.puffSize * BUBBLE.puffVariety
+  return [clamp(x, rx + pad, size.width - rx - pad), clamp(y, ry + pad, size.height - ry - pad)]
 }
 
-/** The bubble as the renderers draw it, its tail pointing in bubble.tailDir. */
+/** The bubble as the renderers draw it: a cloud, its trail pointing in bubble.tailDir. */
 export function bubbleShape(bubble: SpeechBubble, size: Size): BubbleShape {
   const [rx, ry] = shownRadii(bubble, size)
   const cx = bubble.center[0] * size.width
   const cy = bubble.center[1] * size.height
   const [dx, dy] = bubble.tailDir
-  const reach = ovalReach([dx, dy], rx, ry)
-  const base = reach * 0.6                     // where the tail starts, well inside the oval
-  const half = (ry * BUBBLE.tailWidth) / 2
-  const tip = reach + ry * BUBBLE.tail
+  const reach = ovalReach([dx, dy], rx, ry)    // the cloud's edge in that direction (about)
   return {
     center: [cx, cy],
     radii: [rx, ry],
-    tail: [
-      [cx + dx * base - dy * half, cy + dy * base + dx * half],
-      [cx + dx * base + dy * half, cy + dy * base - dx * half],
-      [cx + dx * tip, cy + dy * tip],
-    ],
+    seed: seedOf(bubble),
+    trail: BUBBLE.trail.map(({ at, size: r }): Puff => [cx + dx * (reach + at * ry), cy + dy * (reach + at * ry), r * ry]),
     outline: Math.max(1, BUBBLE.outline * unit(size)),
     glow: bubble.glow,
   }
@@ -243,7 +267,7 @@ export function placeNewBubble(bubbles: SpeechBubble[], dotCenter: [number, numb
   const maxRx = maxRy * BUBBLE.aspect
   const dx = dotCenter[0] * size.width
   const dy = dotCenter[1] * size.height
-  const gap = dotRadius * u * 1.15 + maxRy * BUBBLE.tail   // clear of the dot's edge, room for the tail
+  const gap = dotRadius * u * 1.15 + maxRy * BUBBLE.tail   // clear of the dot's edge, room for the trail
   const tilt = Math.tan(BUBBLE.tilt)   // how far off straight up the first two choices are
   const directions: [number, number][] = [
     [tilt, -1], [-tilt, -1], [1, -1], [-1, -1],   // above
